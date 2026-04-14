@@ -8,7 +8,7 @@ class Settings:
     MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
     DATABASE_NAME: str = os.getenv("DATABASE_NAME", "ats_resume_db")
     UPLOAD_DIR: str = "uploads"
-    BASE_URL: str = os.getenv("BASE_URL", "http://5.161.122.193:2263")
+    BASE_URL: str = os.getenv("BASE_URL", "http://5.161.122.193:3333")
     
     # LLM and Vector Search settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
