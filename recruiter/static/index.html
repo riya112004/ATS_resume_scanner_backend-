@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ATS Resume Scanner</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --secondary: #64748b;
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --text: #1e293b;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        h1 { text-align: center; color: var(--primary); }
+
+        .section {
+            background: var(--card);
+            padding: 25px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            margin-bottom: 30px;
+        }
+
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 600; }
+        input, textarea, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 6px;
+            box-sizing: border-box;
+        }
+
+        button {
+            background-color: var(--primary);
+            color: white;
+            padding: 12px 20px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        button:hover { background-color: #1d4ed8; }
+
+        .results {
+            margin-top: 20px;
+        }
+
+        .resume-card {
+            border-left: 5px solid var(--primary);
+            padding: 15px;
+            margin-bottom: 15px;
+            background: #fff;
+            border-radius: 0 8px 8px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        }
+
+        .score-badge {
+            background: #dcfce7;
+            color: #166534;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 0.9em;
+        }
+
+        .loading { display: none; text-align: center; margin: 10px; color: var(--secondary); }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>ATS Resume Scanner 🚀</h1>
+
+        <!-- Upload Section -->
+        <div class="section">
+            <h2>Upload Resumes (Bulk)</h2>
+            <form id="uploadForm">
+                <div class="form-group">
+                    <label>Select Resumes (PDF/DOCX) - You can select multiple files</label>
+                    <input type="file" id="resumeFile" accept=".pdf,.docx" multiple required>
+                </div>
+                <div class="form-group">
+                    <label>Job Description (Optional for Scoring)</label>
+                    <textarea id="jobDescription" rows="3" placeholder="Paste JD here to see match score..."></textarea>
+                </div>
+                <button type="submit" id="uploadBtn">Upload & Parse All</button>
+            </form>
+            <div id="uploadStatus" style="margin-top:10px;"></div>
+        </div>
+
+        <!-- Search Section -->
+        <div class="section">
+            <h2>Search Resumes</h2>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                <input type="text" id="s_job_title" placeholder="Job Title">
+                <input type="text" id="s_skills" placeholder="Skills">
+                <input type="text" id="s_location" placeholder="Location">
+                <div style="display:flex; gap:5px;">
+                    <input type="number" id="s_min_experience" placeholder="Min Exp">
+                    <input type="number" id="s_max_experience" placeholder="Max Exp">
+                </div>
+            </div>
+            <button style="margin-top:15px; width:100%;" onclick="searchResumes()">Search Candidates</button>
+            
+            <div id="loading" class="loading">Searching AI database...</div>
+            <div id="results" class="results"></div>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = "/api";
+
+        // Upload Logic
+        document.getElementById('uploadForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const btn = document.getElementById('uploadBtn');
+            const status = document.getElementById('uploadStatus');
+            const files = document.getElementById('resumeFile').files;
+            const jd = document.getElementById('jobDescription').value;
+
+            const formData = new FormData();
+            for (let i = 0; i < files.length; i++) {
+                formData.append('files', files[i]);
+            }
+            if(jd) formData.append('job_description', jd);
+
+            btn.disabled = true;
+            status.innerHTML = `Processing ${files.length} resumes with AI... Please wait.`;
+
+            try {
+                const res = await fetch(`${API_BASE}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const results = await res.json();
+                
+                if(res.ok) {
+                    let successCount = results.filter(r => r.status === 'success').length;
+                    status.innerHTML = `<span style="color:green">Completed! Successfully parsed ${successCount} out of ${results.length} files. Check console for details.</span>`;
+                    console.log("Upload Results:", results);
+                } else {
+                    status.innerHTML = `<span style="color:red">Error: ${results.detail || 'Upload failed'}</span>`;
+                }
+            } catch (err) {
+                status.innerHTML = `<span style="color:red">Upload failed. Check server connection.</span>`;
+            } finally {
+                btn.disabled = false;
+            }
+        };
+
+        // Search Logic
+        async function searchResumes() {
+            const resultsDiv = document.getElementById('results');
+            const loading = document.getElementById('loading');
+            
+            const params = new URLSearchParams();
+            const job_title = document.getElementById('s_job_title').value;
+            const skills = document.getElementById('s_skills').value;
+            const location = document.getElementById('s_location').value;
+            const min_exp = document.getElementById('s_min_experience').value;
+            const max_exp = document.getElementById('s_max_experience').value;
+
+            if(job_title) params.append('job_title', job_title);
+            if(skills) params.append('skills', skills);
+            if(location) params.append('location', location);
+            if(min_exp) params.append('min_experience', min_exp);
+            if(max_exp) params.append('max_experience', max_exp);
+
+            loading.style.display = 'block';
+            resultsDiv.innerHTML = "";
+
+            try {
+                const res = await fetch(`${API_BASE}/search?${params}`);
+                const data = await res.json();
+                
+                if(data.length === 0) {
+                    resultsDiv.innerHTML = "<p>No resumes found matching your criteria.</p>";
+                } else {
+                    data.forEach(res => {
+                        const card = document.createElement('div');
+                        card.className = 'resume-card';
+                        card.innerHTML = `
+                            <div style="display:flex; justify-content:space-between; align-items:start;">
+                                <div>
+                                    <strong style="font-size:1.2em">${res.extracted_data.name}</strong><br>
+                                    <small>${res.extracted_data.job_title} | ${res.extracted_data.location}</small>
+                                </div>
+                                <span class="score-badge">Match: ${res.match_score}%</span>
+                            </div>
+                            <p style="margin:10px 0; font-size:0.9em">
+                                <b>Skills:</b> ${res.extracted_data.skills.join(', ')}<br>
+                                <b>Experience:</b> ${res.extracted_data.experience} years
+                            </p>
+                            <a href="${res.resumeURL}" target="_blank" style="color:var(--primary); text-decoration:none; font-weight:600;">View Resume PDF</a>
+                        `;
+                        resultsDiv.appendChild(card);
+                    });
+                }
+            } catch (err) {
+                resultsDiv.innerHTML = "Search failed.";
+            } finally {
+                loading.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Job Seeker - Resume Analysis</title>
+    <style>
+        :root {
+            --primary-color: #4f46e5;
+            --bg-color: #f9fafb;
+            --card-bg: #ffffff;
+            --text-color: #111827;
+            --success-color: #059669;
+            --warning-color: #d97706;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            line-height: 1.5;
+            padding: 2rem;
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        .card {
+            background-color: var(--card-bg);
+            padding: 2rem;
+            border-radius: 0.75rem;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            margin-bottom: 2rem;
+        }
+        h1 { font-size: 1.875rem; margin-bottom: 1.5rem; color: var(--primary-color); }
+        h2 { font-size: 1.5rem; margin-top: 2rem; border-bottom: 2px solid #f3f4f6; padding-bottom: 0.5rem; }
+        .form-group { margin-bottom: 1.25rem; }
+        label { display: block; font-weight: 500; margin-bottom: 0.5rem; }
+        input[type="file"], textarea {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.375rem;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: var(--primary-color);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 0.375rem;
+            font-weight: 600;
+            cursor: pointer;
+            width: 100%;
+        }
+        #results { display: none; }
+        .score-box {
+            text-align: center;
+            padding: 2rem;
+            background: #eef2ff;
+            border-radius: 0.5rem;
+            margin-bottom: 1.5rem;
+        }
+        .score-value { font-size: 3rem; font-weight: 800; color: var(--primary-color); }
+        .parsed-info { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .info-item { margin-bottom: 1rem; }
+        .info-label { font-size: 0.875rem; color: #6b7280; }
+        .info-val { font-weight: 600; }
+        .skills-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+        .skill-tag { background: #f3f4f6; padding: 0.25rem 0.75rem; border-radius: 1rem; font-size: 0.875rem; }
+        .keyword-tag { background: #fee2e2; color: #991b1b; padding: 0.25rem 0.75rem; border-radius: 1rem; font-size: 0.875rem; }
+        .tips-list { padding-left: 1.5rem; }
+        .tips-list li { margin-bottom: 0.5rem; }
+        .verdict { padding: 1rem; border-radius: 0.5rem; font-weight: 600; margin-top: 1rem; }
+        .compatible { background: #d1fae5; color: #065f46; }
+        .not-compatible { background: #ffedd5; color: #9a3412; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Job Seeker - ATS Optimizer</h1>
+        <div class="form-group">
+            <label for="resume">Upload Your Resume (PDF/DOCX)</label>
+            <input type="file" id="resume" accept=".pdf,.docx">
+        </div>
+        <div class="form-group">
+            <label for="jd">Target Job Description</label>
+            <textarea id="jd" rows="6" placeholder="Paste the job description here to get optimization tips..."></textarea>
+        </div>
+        <button id="analyzeBtn">Optimize My Resume</button>
+    </div>
+
+    <div id="results" class="card">
+        <div id="scoreContainer" class="score-box" style="display: none;">
+            <div class="info-label">ATS Compatibility Score</div>
+            <div id="matchScore" class="score-value">0%</div>
+            <div id="verdictText" class="verdict"></div>
+        </div>
+
+        <div id="feedbackSection" style="display: none;">
+            <h2>Optimization Tips</h2>
+            <ul id="tipsList" class="tips-list"></ul>
+            
+            <h2>Missing Keywords</h2>
+            <p style="font-size: 0.875rem; color: #6b7280;">Add these keywords to your resume to increase visibility.</p>
+            <div id="missingKeywords" class="skills-list"></div>
+        </div>
+        
+        <h2>Parsed Information</h2>
+        <div class="parsed-info">
+            <div class="info-item">
+                <div class="info-label">Name</div>
+                <div id="pName" class="info-val">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Detected Role</div>
+                <div id="pTitle" class="info-val">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Experience</div>
+                <div id="pExp" class="info-val">-</div>
+            </div>
+            <div class="info-item">
+                <div class="info-label">Location</div>
+                <div id="pLoc" class="info-val">-</div>
+            </div>
+        </div>
+        <div class="info-item">
+            <div class="info-label">Current Skills</div>
+            <div id="pSkills" class="skills-list"></div>
+        </div>
+        <div style="margin-top: 2rem; text-align: right;">
+            <a id="fileLink" href="#" target="_blank" style="color: var(--primary-color); font-weight: 500;">View Uploaded Resume</a>
+        </div>
+    </div>
+
+    <script>
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const results = document.getElementById('results');
+        
+        analyzeBtn.onclick = async () => {
+            const file = document.getElementById('resume').files[0];
+            const jd = document.getElementById('jd').value;
+            
+            if (!file) {
+                alert("Please upload your resume.");
+                return;
+            }
+
+            analyzeBtn.disabled = true;
+            analyzeBtn.innerText = "Analyzing & Optimizing...";
+
+            const formData = new FormData();
+            formData.append('file', file);
+            if (jd) formData.append('job_description', jd);
+
+            try {
+                const response = await fetch('/seeker-api/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    results.style.display = 'block';
+                    const p = data.parsed_data;
+                    
+                    document.getElementById('pName').innerText = p.name;
+                    document.getElementById('pTitle').innerText = p.job_title;
+                    document.getElementById('pExp').innerText = p.experience + " years";
+                    document.getElementById('pLoc').innerText = p.location;
+                    document.getElementById('fileLink').href = data.resumeURL;
+
+                    const skillsContainer = document.getElementById('pSkills');
+                    skillsContainer.innerHTML = '';
+                    p.skills.forEach(skill => {
+                        const span = document.createElement('span');
+                        span.className = 'skill-tag';
+                        span.innerText = skill;
+                        skillsContainer.appendChild(span);
+                    });
+
+                    // Handle Feedback
+                    if (data.match_score !== null) {
+                        document.getElementById('scoreContainer').style.display = 'block';
+                        document.getElementById('matchScore').innerText = data.match_score + "%";
+                        
+                        const feedbackSection = document.getElementById('feedbackSection');
+                        const vText = document.getElementById('verdictText');
+                        
+                        if (data.feedback) {
+                            feedbackSection.style.display = 'block';
+                            vText.innerText = data.feedback.final_verdict;
+                            vText.className = 'verdict ' + (data.feedback.is_compatible ? 'compatible' : 'not-compatible');
+                            
+                            // Tips
+                            const tipsList = document.getElementById('tipsList');
+                            tipsList.innerHTML = '';
+                            data.feedback.optimization_tips.forEach(tip => {
+                                const li = document.createElement('li');
+                                li.innerText = tip;
+                                tipsList.appendChild(li);
+                            });
+
+                            // Keywords
+                            const keywordContainer = document.getElementById('missingKeywords');
+                            keywordContainer.innerHTML = '';
+                            data.feedback.missing_keywords.forEach(kw => {
+                                const span = document.createElement('span');
+                                span.className = 'keyword-tag';
+                                span.innerText = kw;
+                                keywordContainer.appendChild(span);
+                            });
+                        }
+                    } else {
+                        document.getElementById('scoreContainer').style.display = 'none';
+                        document.getElementById('feedbackSection').style.display = 'none';
+                    }
+
+                    results.scrollIntoView({ behavior: 'smooth' });
+                } else {
+                    alert("Error: " + data.detail);
+                }
+            } catch (err) {
+                alert("Request failed. Please check your connection.");
+                console.error(err);
+            } finally {
+                analyzeBtn.disabled = false;
+                analyzeBtn.innerText = "Optimize My Resume";
+            }
+        };
+    </script>
+</body>
+</html>

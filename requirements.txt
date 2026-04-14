@@ -1,0 +1,14 @@
+pytesseract
+pdf2image
+pillow
+pdfplumber
+fastapi
+uvicorn
+python-multipart
+pymongo
+motor
+pypdf
+python-docx
+python-dotenv
+openai
+sentence-transformers
