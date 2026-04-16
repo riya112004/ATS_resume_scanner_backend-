@@ -6,14 +6,14 @@ from recruiter.core.config import settings
 from recruiter.utils.experience_manager import exp_manager
 
 class ResumeData(BaseModel):
-    name: str
-    email: str
-    phone_number: str
-    skills: List[str]
-    education: List[str]
-    experience: float  # Only storing the final decimal value (e.g., 0.9)
-    location: str
-    job_title: str
+    name: Optional[str] = "Unknown"
+    email: Optional[str] = None
+    phone_number: Optional[str] = None
+    skills: List[str] = []
+    education: List[str] = []
+    experience: float = 0.0
+    location: Optional[str] = "Unknown"
+    job_title: Optional[str] = "Unknown"
 
 class AIParser:
     def __init__(self):
@@ -57,24 +57,23 @@ class AIParser:
             
             raw_data = json.loads(response.choices[0].message.content)
             
-            # 1. Normalize skills (Save-time normalization)
-            # This turns ["Python ", "React.js"] into ["python", "react.js"]
-            clean_skills = [s.strip().lower() for s in raw_data.get("skills", []) if s.strip()]
+            # 1. Normalize skills
+            clean_skills = [s.strip().lower() for s in raw_data.get("skills", []) if s and str(s).strip()]
             
-            # 2. Internal calculation logic remains the same
+            # 2. Internal calculation logic
             exp_result = exp_manager.calculate_total_experience(raw_data.get("companies", []))
             final_experience = exp_result["decimal"]
             
-            # 3. Return clean data (experience_breakdown is excluded)
+            # 3. Return clean data
             return ResumeData(
-                name=raw_data.get("name", ""),
-                email=raw_data.get("email", ""),
-                phone_number=raw_data.get("phone_number", ""),
+                name=raw_data.get("name") or "Unknown",
+                email=raw_data.get("email"),
+                phone_number=raw_data.get("phone_number"),
                 skills=clean_skills, 
                 education=raw_data.get("education", []),
                 experience=final_experience,
-                location=raw_data.get("location", ""),
-                job_title=raw_data.get("job_title", "")
+                location=raw_data.get("location") or "Unknown",
+                job_title=raw_data.get("job_title") or "Unknown"
             )
             
         except Exception as e:

@@ -35,72 +35,67 @@ async def upload_and_parse_resume(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
     
-    # 2. Extract text from file
     try:
         raw_text = await extract_text_from_file(file_path)
-        if not raw_text or len(raw_text.strip()) < 10:
-            raise ValueError("Extracted text is too short or empty.")
-    except Exception as e:
-        if os.path.exists(file_path): os.remove(file_path)
-        raise HTTPException(status_code=400, detail=f"Text extraction failed: {str(e)}")
-    
-    # 3. Parse resume with AI
-    try:
         parsed_data = await parser.parse_resume_text(raw_text)
-    except Exception as e:
-        if os.path.exists(file_path): os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"AI Parsing failed: {str(e)}")
-
-    # 4. Generate Embedding for the resume (for future semantic features)
-    try:
-        # Create a rich text representation for embedding
-        text_for_embedding = f"""
-        Name: {parsed_data.name}
-        Title: {parsed_data.job_title}
-        Skills: {', '.join(parsed_data.skills)}
-        Experience: {parsed_data.experience} years
-        Education: {', '.join(parsed_data.education)}
-        Location: {parsed_data.location}
-        """
+        
+        text_for_embedding = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)} Experience: {parsed_data.experience} years"
         embedding = await embedding_service.generate_embedding(text_for_embedding.strip())
-    except Exception as e:
-        print(f"Warning: Embedding generation failed: {e}")
-        embedding = []
+        
+        match_score = None
+        feedback = None
+        if job_description:
+            match_score = await calculate_match_score(raw_text, job_description)
+            feedback = await seeker_service.get_resume_feedback(raw_text, job_description)
 
-    # 5. Optional Match Score and Feedback if JD is provided
-    match_score = None
-    feedback = None
-    if job_description:
-        match_score = await calculate_match_score(raw_text, job_description)
-        feedback = await seeker_service.get_resume_feedback(raw_text, job_description)
-
-    # 6. Save to MongoDB (Separate Seeker Collection)
-    full_resume_url = f"{settings.BASE_URL}/uploads/{file_name}"
-    resume_doc = {
-        "resumeURL": full_resume_url,
-        "extracted_data": parsed_data.dict(),
-        "embedding": embedding,
-        "status": "seeker_upload"
-    }
-    
-    try:
+        # 6. Save to MongoDB (Use relative URL)
+        relative_resume_url = f"/uploads/{file_name}"
+        resume_doc = {
+            "resumeURL": relative_resume_url,
+            "extracted_data": parsed_data.dict(),
+            "embedding": embedding,
+            "status": "seeker_upload",
+            "updated_at": uuid.uuid4().hex
+        }
+        
+        # --- DUPLICATE CHECK (Email or Phone) ---
+        email = str(parsed_data.email).strip().lower() if parsed_data.email else None
+        phone = re.sub(r"\D", "", str(parsed_data.phone_number)) if parsed_data.phone_number else None
+        
+        query_parts = []
+        if email:
+            query_parts.append({"extracted_data.email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+        if phone:
+            phone_regex = "".join([f"{c}[^0-9]*" for c in phone])
+            query_parts.append({"extracted_data.phone_number": {"$regex": phone_regex}})
+        
+        existing = None
+        if query_parts:
+            existing = await db.db["seeker_resumes"].find_one({"$or": query_parts})
+        
+        if existing:
+            # Delete the newly uploaded file as it is a duplicate
+            if os.path.exists(file_path): os.remove(file_path)
+            raise HTTPException(status_code=400, detail="Resume already exists.")
+        
         result = await db.db["seeker_resumes"].insert_one(resume_doc)
         db_id = str(result.inserted_id)
-    except Exception as e:
-        print(f"Database insertion failed: {e}")
-        db_id = None
-    
-    # Return structured JSON
-    return {
-        "_id": db_id,
-        "filename": file.filename,
-        "resume_url": full_resume_url,
-        "structured_data": parsed_data.dict(),
-        "analysis": {
-            "match_score": match_score,
-            "feedback": feedback.dict() if feedback else None
+        
+        # Return structured JSON (Full URL for client)
+        return {
+            "_id": db_id,
+            "filename": file.filename,
+            "is_update": True if existing else False,
+            "resume_url": f"{settings.BASE_URL}{relative_resume_url}",
+            "structured_data": parsed_data.dict(),
+            "analysis": {
+                "match_score": match_score,
+                "feedback": feedback.dict() if feedback else None
+            }
         }
-    }
+    except Exception as e:
+        if os.path.exists(file_path): os.remove(file_path)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/analyze")
 async def analyze_resume(

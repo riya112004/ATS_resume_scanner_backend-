@@ -2,8 +2,11 @@ import os
 import uuid
 import numpy as np
 import re
+import logging
+import asyncio
+import time
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
-from typing import List, Optional
+from typing import List, Optional, Dict
 from recruiter.core.config import settings
 from recruiter.core.database import db
 from recruiter.utils.extractor import extract_text_from_file
@@ -11,134 +14,164 @@ from recruiter.services.parser import parser
 from recruiter.services.embeddings import embedding_service
 from recruiter.services.matching import calculate_match_score
 
+# Configure Logging
+log_file = os.path.join(os.getcwd(), "activity.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler(log_file),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("recruiter_api")
+
 router = APIRouter()
+
+# --- JOB TITLE SYNONYMS ---
+JOB_SYNONYMS = {
+    "dev": ["developer", "engineer", "software"],
+    "developer": ["dev", "engineer", "software"],
+    "engineer": ["dev", "developer", "software"],
+    "frontend": ["front-end", "ui", "ux", "client side"],
+    "backend": ["back-end", "server side", "api", "distributed"],
+    "fullstack": ["full stack", "full-stack", "mern", "mean"],
+    "data": ["analyst", "scientist", "ai", "ml"],
+    "hr": ["human resources", "recruiter", "talent"],
+    "qa": ["quality assurance", "tester", "testing", "sdet"]
+}
 
 # --- HELPERS ---
 
 def get_strict_skill_regex(skill: str):
-    """
-    Creates a strict regex that matches the word ONLY if it is:
-    - At the start or preceded by space/slash
-    - At the end or followed by space/slash
-    This handles "C" vs "C++" and "MongoDb/Sanity" correctly.
-    """
     escaped = re.escape(skill.lower())
     return f"(^|[ /]){escaped}($|[ /])"
 
 def normalize_val(val: str) -> str:
-    """Trims and lowercases a string."""
     if not val: return ""
     return str(val).strip().lower()
 
 def is_valid_location_query(query: str) -> bool:
-    """
-    Validates if the location query is searchable:
-    - MUST be at least 3 letters.
-    - MUST NOT be a junk word (unknown, n/a, etc).
-    """
     if not query: return False
     clean_q = normalize_val(query)
     junk = ["unknown", "n/a", "none", "undefined", "null", "na", "n / a"]
-    
-    # STRICT RULE: Mandatory 3 letters for search to trigger
     if len(clean_q) < 3 or clean_q in junk:
         return False
     return True
+
+def tokenize_and_expand_job(query: str) -> List[List[str]]:
+    words = re.findall(r'\w+', query.lower())
+    token_groups = []
+    for word in words:
+        group = [word]
+        if word in JOB_SYNONYMS:
+            group.extend(JOB_SYNONYMS[word])
+        token_groups.append(list(set(group)))
+    return token_groups
+
+def rank_job_results(results: List[Dict], original_query: str) -> List[Dict]:
+    if not original_query: return results
+    q_lower = original_query.lower().strip()
+    
+    for res in results:
+        title = normalize_val(res.get("extracted_data", {}).get("job_title", ""))
+        score = 0
+        if title == q_lower: score = 100
+        elif q_lower in title: score = 80
+        else:
+            tokens = q_lower.split()
+            if any(t in title for t in tokens): score = 50
+            else: score = 20
+        res["job_rank_score"] = score
+        
+    results.sort(key=lambda x: (x.get("job_rank_score", 0), x.get("match_score", 0)), reverse=True)
+    return results
+
+# --- SEMAPHORE (Limit concurrency) ---
+MAX_CONCURRENT_TASKS = 30
+semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 @router.post("/upload")
 async def upload_resumes(
     files: List[UploadFile] = File(...),
     job_description: Optional[str] = Form(None)
 ):
-    results = []
-    for file in files:
-        # Reset variables for each file to prevent data carry-over
-        raw_text = ""
-        parsed_data = None
-        embedding = []
-        
-        # 1. Save file locally
-        file_id = str(uuid.uuid4())
-        _, ext = os.path.splitext(file.filename)
-        file_name = f"{file_id}{ext}"
-        file_path = os.path.join(settings.UPLOAD_DIR, file_name)
-        
-        print(f"Processing file: {file.filename}")
-        
-        try:
-            content = await file.read()
-            with open(file_path, "wb") as buffer:
-                buffer.write(content)
-            print(f"File saved to: {file_path}")
-        except Exception as e:
-            print(f"Save error: {e}")
-            results.append({"filename": file.filename, "error": f"Could not save file: {str(e)}"})
-            continue
-        
-        # 2. Extract text from file
-        try:
-            raw_text = await extract_text_from_file(file_path)
-            print(f"Extracted text length: {len(raw_text) if raw_text else 0}")
-            if not raw_text or len(raw_text.strip()) < 10:
-                raise ValueError("Extracted text is too short or empty. Is this a scanned image?")
-        except Exception as e:
-            print(f"Extraction error: {e}")
-            if os.path.exists(file_path): os.remove(file_path)
-            results.append({"filename": file.filename, "error": f"Text extraction failed: {str(e)}"})
-            continue
-        
-        # 3. Parse resume with AI
-        try:
-            parsed_data = await parser.parse_resume_text(raw_text)
-            print(f"AI Parsed successfully: {parsed_data.name}")
-        except Exception as e:
-            print(f"AI Parsing error: {e}")
-            if os.path.exists(file_path): os.remove(file_path)
-            results.append({"filename": file.filename, "error": f"AI Parsing failed: {str(e)}"})
-            continue
-        
-        # 4. Generate embeddings from the parsed data
-        try:
-            parsed_text_for_embedding = f"""
-            Candidate Name: {parsed_data.name}
-            Job Title: {parsed_data.job_title}
-            Skills: {', '.join(parsed_data.skills)}
-            Experience: {parsed_data.experience} years
-            Location: {parsed_data.location}
-            """
-            embedding = await embedding_service.generate_embedding(parsed_text_for_embedding.strip())
-        except Exception as e:
-            if os.path.exists(file_path): os.remove(file_path)
-            results.append({"filename": file.filename, "error": f"Embedding generation failed: {str(e)}"})
-            continue
-        
-        # 5. Calculate match score if job description is provided
-        match_score = 0.0
-        if job_description:
-            match_score = await calculate_match_score(raw_text, job_description)
-        
-        # 6. Prepare document for MongoDB
-        full_resume_url = f"{settings.BASE_URL}/uploads/{file_name}"
-        resume_document = {
-            "resumeURL": full_resume_url,
-            "extracted_data": parsed_data.dict(),
-            "embedding": embedding
-        }
-        
-        try:
-            # Insert into DB
-            await db.db["resumes"].insert_one(resume_document)
+    upload_start = time.time()
+    logger.info(f"Upload request received for {len(files)} files. Limit: {MAX_CONCURRENT_TASKS}.")
+    
+    # Pre-calculate JD Embedding once to save time
+    jd_embedding = None
+    if job_description:
+        logger.info("Pre-calculating Job Description Embedding...")
+        jd_embedding = await embedding_service.generate_embedding(job_description)
+
+    async def process_single_file(file: UploadFile):
+        async with semaphore:
+            start_time = time.time()
+            file_id = str(uuid.uuid4())
+            _, ext = os.path.splitext(file.filename)
+            file_name = f"{file_id}{ext}"
+            file_path = os.path.join(settings.UPLOAD_DIR, file_name)
             
-            results.append({
-                "filename": file.filename,
-                "status": "success",
-                "match_score": match_score,
-                "resumeURL": full_resume_url
-            })
-        except Exception as e:
-            if os.path.exists(file_path): os.remove(file_path)
-            results.append({"filename": file.filename, "error": f"Database insertion failed: {str(e)}"})
-            
+            try:
+                content = await file.read()
+                with open(file_path, "wb") as buffer:
+                    buffer.write(content)
+                
+                # 1. Extraction & AI Parsing
+                raw_text = await extract_text_from_file(file_path)
+                parsed_data = await parser.parse_resume_text(raw_text)
+                
+                # 2. Duplicate Check
+                email = str(parsed_data.email).strip().lower() if parsed_data.email else None
+                phone = re.sub(r"\D", "", str(parsed_data.phone_number)) if parsed_data.phone_number else None
+                
+                query_parts = []
+                if email:
+                    query_parts.append({"extracted_data.email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
+                if phone:
+                    phone_regex = "".join([f"{c}[^0-9]*" for c in phone])
+                    query_parts.append({"extracted_data.phone_number": {"$regex": phone_regex}})
+                
+                if query_parts and await db.db["resumes"].find_one({"$or": query_parts}):
+                    if os.path.exists(file_path): os.remove(file_path)
+                    return {"filename": file.filename, "status": "duplicate", "message": "Candidate exists."}
+
+                # 3. AI Tasks (Parallel)
+                parsed_text = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)}"
+                embedding_task = embedding_service.generate_embedding(parsed_text.strip())
+                match_task = calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding) if job_description else None
+                
+                if match_task:
+                    embedding, match_score = await asyncio.gather(embedding_task, match_task)
+                else:
+                    embedding, match_score = await embedding_task, 0.0
+
+                # 4. Save to MongoDB
+                relative_url = f"/uploads/{file_name}"
+                await db.db["resumes"].insert_one({
+                    "resumeURL": relative_url,
+                    "extracted_data": parsed_data.dict(),
+                    "embedding": embedding,
+                    "updated_at": uuid.uuid4().hex
+                })
+                
+                logger.info(f"PERF: {file.filename} - Total {round(time.time() - start_time, 2)}s")
+                return {
+                    "filename": file.filename,
+                    "status": "success",
+                    "match_score": match_score,
+                    "resumeURL": f"{settings.BASE_URL}{relative_url}"
+                }
+            except Exception as e:
+                logger.error(f"Error {file.filename}: {str(e)}")
+                if os.path.exists(file_path): os.remove(file_path)
+                return {"filename": file.filename, "error": str(e)}
+
+    tasks = [process_single_file(file) for file in files]
+    results = await asyncio.gather(*tasks)
+    
+    logger.info(f"Batch completed in {round(time.time() - upload_start, 2)}s")
     return results
 
 @router.get("/search")
@@ -149,111 +182,61 @@ async def search_resumes(
     skills: Optional[str] = None,
     education: Optional[str] = None,
     job_title: Optional[str] = None,
-    match_all: bool = Query(False, description="If true, resume must contain ALL searched skills"),
+    match_all: bool = Query(False),
     limit: int = 10
 ):
-    # 1. Construct MongoDB Filter
     mongo_filter = {}
+    combined_filters = []
     
-    # Strict Experience Range Filter
     if min_experience is not None or max_experience is not None:
-        mongo_filter["extracted_data.experience"] = {}
-        if min_experience is not None:
-            mongo_filter["extracted_data.experience"]["$gte"] = min_experience
-        if max_experience is not None:
-            mongo_filter["extracted_data.experience"]["$lte"] = max_experience
+        exp_filter = {}
+        if min_experience is not None: exp_filter["$gte"] = min_experience
+        if max_experience is not None: exp_filter["$lte"] = max_experience
+        combined_filters.append({"extracted_data.experience": exp_filter})
 
-    # STRICT Skills Filter (Sanitized & Regex Boundary)
-    skill_condition = None
     if skills:
-        # Split, trim, lowercase, and remove empty tokens
         skill_list = [s.strip().lower() for s in skills.split(",") if s.strip()]
-        
         if skill_list:
-            # Create regex conditions for each skill using strict boundaries
-            conditions = [
-                {"extracted_data.skills": {"$regex": get_strict_skill_regex(s), "$options": "i"}} 
-                for s in skill_list
-            ]
-            
-            # Logic: Match ALL ($and) vs Match ANY ($or)
-            skill_condition = {"$and" if match_all else "$or": conditions}
+            conditions = [{"extracted_data.skills": {"$regex": get_strict_skill_regex(s), "$options": "i"}} for s in skill_list]
+            combined_filters.append({"$and" if match_all else "$or": conditions})
 
-    # INTELLIGENT Location Filter (Strict 3-letter rule)
-    location_condition = None
     if location and is_valid_location_query(location):
         clean_loc = normalize_val(location)
-        # Handle partial words for better matching (e.g. "west ben" -> "west|ben")
         words = [re.escape(w) for w in clean_loc.split() if len(w) >= 2]
         if words:
             loc_pattern = "|".join(words)
-            location_condition = {
-                "extracted_data.location": {
-                    "$regex": loc_pattern, 
-                    "$options": "i",
-                    # STRICT: Exclude junk values from results
-                    "$nin": ["unknown", "n/a", "", None, "undefined", "N/A", "Unknown", "n / a"]
-                }
-            }
+            combined_filters.append({"extracted_data.location": {"$regex": loc_pattern, "$options": "i"}})
 
-    # Combine Filters into MongoDB Query
-    combined_filters = []
-    if skill_condition: combined_filters.append(skill_condition)
-    if location_condition: combined_filters.append(location_condition)
-    
+    if job_title:
+        token_groups = tokenize_and_expand_job(job_title)
+        if token_groups:
+            job_conditions = [{"extracted_data.job_title": {"$regex": "|".join([re.escape(t) for t in g]), "$options": "i"}} for g in token_groups]
+            combined_filters.append({"$and": job_conditions})
+
     if combined_filters:
-        if len(combined_filters) > 1:
-            mongo_filter["$and"] = combined_filters
-        else:
-            # Only one filter is active
-            mongo_filter.update(combined_filters[0])
+        mongo_filter["$and" if len(combined_filters) > 1 else None] = combined_filters if len(combined_filters) > 1 else combined_filters[0]
+        if None in mongo_filter: mongo_filter = combined_filters[0]
 
-    # 2. Fetch Filtered Resumes
     all_resumes = await db.db["resumes"].find(mongo_filter).to_list(length=100)
-
-    # 3. Construct Query for AI Ranking
-    rank_parts = []
-    if job_title: rank_parts.append(f"Job Title: {job_title}")
-    if skills: rank_parts.append(f"Skills: {skills}")
-    if location: rank_parts.append(f"Location: {location}")
     
-    search_query = " ".join(rank_parts)
-    
-    if not search_query or not all_resumes:
-        # Fallback if no ranking criteria or no results
-        results = []
-        for res in all_resumes[:limit]:
-            res["_id"] = str(res["_id"])
-            res.pop("embedding", None)
-            res["match_score"] = 0.0
-            results.append(res)
-        return results
-
-    # 4. Perform AI Semantic Ranking on Filtered Results
-    try:
+    scored_results = []
+    if job_title or skills or location:
+        search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
         query_embedding = await embedding_service.generate_embedding(search_query)
-        scored_results = []
-        
         for res in all_resumes:
             if "embedding" in res:
-                # Calculate overall similarity between search profile and resume profile
-                a = np.array(query_embedding)
-                b = np.array(res["embedding"])
+                a, b = np.array(query_embedding), np.array(res["embedding"])
                 similarity = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-                
-                res["_id"] = str(res["_id"])
-                # Handle absolute resumeURL
-                if res["resumeURL"].startswith("/uploads/"):
-                    res["resumeURL"] = f"{settings.BASE_URL}{res['resumeURL']}"
-                
-                res.pop("embedding", None)
-                # Convert to percentage
                 res["match_score"] = float(round(similarity * 100, 2))
+                res["_id"] = str(res["_id"])
+                if res["resumeURL"].startswith("/uploads/"): res["resumeURL"] = f"{settings.BASE_URL}{res['resumeURL']}"
+                res.pop("embedding", None)
                 scored_results.append(res)
-        
-        # Sort by overall match score descending
-        scored_results.sort(key=lambda x: x["match_score"], reverse=True)
-        
-        return scored_results[:limit]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ranking failed: {str(e)}")
+        return rank_job_results(scored_results, job_title)[:limit]
+
+    for res in all_resumes:
+        res["_id"] = str(res["_id"])
+        if res["resumeURL"].startswith("/uploads/"): res["resumeURL"] = f"{settings.BASE_URL}{res['resumeURL']}"
+        res.pop("embedding", None)
+        res["match_score"] = 0.0
+    return all_resumes[:limit]
