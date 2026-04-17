@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from typing import List, Optional
@@ -26,26 +27,25 @@ class AIParser:
 
     async def parse_resume_text(self, text: str) -> ResumeData:
         """
-        Parses resume text. Uses AI for intelligent location classification 
-        (City, State, Country) and numeric experience extraction.
+        Parses resume text. Uses AI for extraction with dynamic date context, 
+        and Python logic for strict mathematical experience calculation.
         """
+        # Dynamically get today's month and year
+        today_str = datetime.now().strftime("%B %Y")
+        
         prompt = f"""
-        You are an expert resume parsing engine.
+        You are an expert resume parsing engine. TODAY'S DATE IS {today_str}.
         Extract information from the resume text provided below.
         
-        STRICT LOCATION DETECTION RULES:
-        1. Identify the location mentioned in the resume.
-        2. Break it down into:
-           - city: The specific city (e.g., "Savannah", "Paris").
-           - state: The state or province (e.g., "GA", "Ontario"). Normalize to 2-letter codes for US/Canada if possible.
-           - country: The full country name (e.g., "United States", "India").
-           - postal_code: Zip or Pin code if found.
-        3. If a field is missing, return an empty string.
-
-        STRICT EXPERIENCE EXTRACTION RULES:
-        1. Extract total years of experience as a numeric FLOAT value.
-        2. "10+ yrs" -> 10.0, "Senior level" -> 10.0, "Junior" -> 2.0.
+        STRICT EXPERIENCE RULES:
+        1. Identify ALL work experience entries.
+        2. For each, extract: company name, start date, and end date.
+        3. If an end date is 'Present', 'Current', or 'Now', use '{today_str}'.
+        4. Also provide a direct "ai_suggested_exp" value IF explicitly stated (e.g. "10+ years").
         
+        LOCATION DETECTION:
+        - Break location into city, state, and country fields.
+
         Return ONLY a JSON object with these EXACT keys:
         - name
         - email
@@ -53,13 +53,12 @@ class AIParser:
         - skills (list of strings)
         - education (list of strings)
         - companies (list of objects with: company, start_date, end_date)
-        - location_raw (the full original location string)
+        - location_raw
         - city
         - state
         - country
-        - postal_code
         - job_title
-        - experience (numeric float)
+        - ai_suggested_exp (numeric float or null)
 
         Resume text:
         {text[:4000]}
@@ -78,23 +77,24 @@ class AIParser:
             # 1. Normalize skills
             clean_skills = [s.strip().lower() for s in raw_data.get("skills", []) if s and str(s).strip()]
             
-            # 2. Experience logic: Prioritize AI numeric extraction
-            ai_exp = raw_data.get("experience")
-            final_experience = 0.0
-            if ai_exp is not None:
+            # 2. ADVANCED EXPERIENCE LOGIC (Double Layer)
+            # A. Calculate strictly from dates using Python (Reliable for 1yr 11mo cases)
+            exp_result = exp_manager.calculate_total_experience(raw_data.get("companies", []))
+            calculated_exp = exp_result["decimal"]
+            
+            # B. Check for AI suggested "10+" style values
+            ai_val = raw_data.get("ai_suggested_exp")
+            final_experience = calculated_exp
+            
+            if ai_val is not None:
                 try:
-                    final_experience = float(ai_exp)
+                    # If AI explicitly found a high number (like 10+), trust it over date math
+                    if float(ai_val) > calculated_exp:
+                        final_experience = float(ai_val)
                 except (ValueError, TypeError):
-                    final_experience = 0.0
+                    pass
             
-            if final_experience <= 0:
-                exp_result = exp_manager.calculate_total_experience(raw_data.get("companies", []))
-                final_experience = exp_result["decimal"]
-            
-            if ai_exp and float(ai_exp) >= 10.0:
-                final_experience = max(final_experience, float(ai_exp))
-            
-            # 3. Return clean data with AI-detected Location
+            # 3. Return clean data
             return ResumeData(
                 name=raw_data.get("name") or "Unknown",
                 email=raw_data.get("email"),
@@ -106,7 +106,6 @@ class AIParser:
                 city=raw_data.get("city", ""),
                 state=raw_data.get("state", ""),
                 country=raw_data.get("country", ""),
-                postal_code=raw_data.get("postal_code", ""),
                 job_title=raw_data.get("job_title") or "Unknown"
             )
             

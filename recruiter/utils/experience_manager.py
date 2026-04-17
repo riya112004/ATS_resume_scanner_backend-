@@ -16,15 +16,12 @@ class ExperienceCalculator:
         Handles 'Present', 'Current', and various date string variations.
         """
         if not date_str or any(word in date_str.lower() for word in ["present", "current", "now"]):
-            # Using April 2026 based on the current session context
-            return datetime(2026, 4, 1)
+            return datetime.now()
         
         try:
-            # dateutil.parser handles "Oct. 2022", "Jul 2022", "2022-07" etc.
             return date_parser.parse(date_str)
         except (ValueError, TypeError):
-            # Fallback to current date if parsing fails
-            return datetime(2026, 4, 1)
+            return datetime.now()
 
     @staticmethod
     def calculate_months(start: datetime, end: datetime) -> int:
@@ -99,8 +96,8 @@ class ExperienceCalculator:
         years = total_unique_months // 12
         remaining_months = total_unique_months % 12
         
-        # Decimal format logic (1yr 3mo = 1.3)
-        decimal_val = float(f"{years}.{remaining_months}")
+        # Mathematical decimal format (e.g., 1yr 11mo = 1.91)
+        decimal_val = round(total_unique_months / 12, 1)
 
         return {
             "total_months": total_unique_months,

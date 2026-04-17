@@ -38,7 +38,10 @@ JOB_SYNONYMS = {
     "fullstack": ["full stack", "full-stack", "mern", "mean"],
     "data": ["analyst", "scientist", "ai", "ml"],
     "hr": ["human resources", "recruiter", "talent"],
-    "qa": ["quality assurance", "tester", "testing", "sdet"]
+    "qa": ["quality assurance", "tester", "testing", "sdet"],
+    "cna": ["nursing assistant", "certified nursing assistant", "patient care", "nurse"],
+    "nursing": ["cna", "nurse", "assistant", "medical"],
+    "assistant": ["helper", "support", "aide", "assistant"]
 }
 
 # --- HELPERS ---
@@ -217,7 +220,6 @@ async def search_resumes(
     search_loc_parts = []
     if location and is_valid_location_query(location):
         # AI will have stored these fields. We match the query against any of them.
-        loc_clean = re.escape(location.strip())
         search_loc_parts = [p.strip() for p in location.split(",")]
         
         loc_conditions = []
@@ -235,12 +237,15 @@ async def search_resumes(
     if job_title:
         token_groups = tokenize_and_expand_job(job_title)
         if token_groups:
+            # Change to $or to get more results
             job_conditions = [{"extracted_data.job_title": {"$regex": "|".join([re.escape(t) for t in g]), "$options": "i"}} for g in token_groups]
-            combined_filters.append({"$and": job_conditions})
+            combined_filters.append({"$or": job_conditions})
 
     if combined_filters:
-        mongo_filter["$and" if len(combined_filters) > 1 else None] = combined_filters if len(combined_filters) > 1 else combined_filters[0]
-        if None in mongo_filter: mongo_filter = combined_filters[0]
+        if len(combined_filters) > 1:
+            mongo_filter["$and"] = combined_filters
+        else:
+            mongo_filter = combined_filters[0]
 
     all_resumes = await db.db["recruiter's resume"].find(mongo_filter).to_list(length=limit)
     
