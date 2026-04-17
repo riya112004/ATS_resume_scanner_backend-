@@ -48,7 +48,7 @@ JOB_SYNONYMS = {
 
 def get_strict_skill_regex(skill: str):
     escaped = re.escape(skill.lower())
-    return f"(^|[ /]){escaped}($|[ /])"
+    return f"(^|[ /]){escaped}($|[ /\\.]|js)"
 
 def normalize_val(val: str) -> str:
     if not val: return ""
