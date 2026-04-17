@@ -87,6 +87,8 @@ def rank_job_results(results: List[Dict], original_query: str) -> List[Dict]:
     results.sort(key=lambda x: (x.get("job_rank_score", 0), x.get("match_score", 0)), reverse=True)
     return results
 
+from recruiter.utils.hashing import generate_identity_hash
+
 # --- SEMAPHORE (Limit concurrency) ---
 MAX_CONCURRENT_TASKS = 30
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
@@ -99,45 +101,54 @@ async def upload_resumes(
     upload_start = time.time()
     logger.info(f"Upload request received for {len(files)} files. Limit: {MAX_CONCURRENT_TASKS}.")
     
-    # Pre-calculate JD Embedding once to save time
+    # Pre-calculate JD Embedding once
     jd_embedding = None
     if job_description:
-        logger.info("Pre-calculating Job Description Embedding...")
         jd_embedding = await embedding_service.generate_embedding(job_description)
 
     async def process_single_file(file: UploadFile):
         async with semaphore:
             start_time = time.time()
-            file_id = str(uuid.uuid4())
-            _, ext = os.path.splitext(file.filename)
-            file_name = f"{file_id}{ext}"
-            file_path = os.path.join(settings.UPLOAD_DIR, file_name)
-            
             try:
+                # 1. SAVE FILE TEMPORARILY
+                file_id = str(uuid.uuid4())
+                _, ext = os.path.splitext(file.filename)
+                file_name = f"{file_id}{ext}"
+                file_path = os.path.join(settings.UPLOAD_DIR, file_name)
+                
                 content = await file.read()
                 with open(file_path, "wb") as buffer:
                     buffer.write(content)
                 
-                # 1. Extraction & AI Parsing
+                # 2. EXTRACTION & AI PARSING (Get Name/Email)
                 raw_text = await extract_text_from_file(file_path)
                 parsed_data = await parser.parse_resume_text(raw_text)
                 
-                # 2. Duplicate Check
-                email = str(parsed_data.email).strip().lower() if parsed_data.email else None
-                phone = re.sub(r"\D", "", str(parsed_data.phone_number)) if parsed_data.phone_number else None
+                # 3. GENERATE IDENTITY HASH (Name + Email)
+                identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
                 
-                query_parts = []
-                if email:
-                    query_parts.append({"extracted_data.email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
-                if phone:
-                    phone_regex = "".join([f"{c}[^0-9]*" for c in phone])
-                    query_parts.append({"extracted_data.phone_number": {"$regex": phone_regex}})
+                # 4. ULTRA-STRICT DUPLICATE CHECK
+                # Search by: Hash OR exact email match (Fallback)
+                duplicate_query = {
+                    "$or": [
+                        {"identity_hash": identity_hash},
+                        {"extracted_data.email": {"$regex": f"^{re.escape(str(parsed_data.email).strip())}$", "$options": "i"}}
+                    ]
+                }
                 
-                if query_parts and await db.db["resumes"].find_one({"$or": query_parts}):
+                existing = await db.db["recruiter's resume"].find_one(duplicate_query)
+                if existing:
+                    logger.info(f"Duplicate found for {parsed_data.name}. Identity Hash: {identity_hash}")
                     if os.path.exists(file_path): os.remove(file_path)
-                    return {"filename": file.filename, "status": "duplicate", "message": "Candidate exists."}
+                    return {
+                        "filename": file.filename,
+                        "status": "duplicate_resume",
+                        "message": f"Candidate {parsed_data.name} already exists.",
+                        "identity_hash": identity_hash,
+                        "resumeURL": f"{settings.BASE_URL}{existing.get('resumeURL')}"
+                    }
 
-                # 3. AI Tasks (Parallel)
+                # 5. AI TASKS (Parallel)
                 parsed_text = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)}"
                 embedding_task = embedding_service.generate_embedding(parsed_text.strip())
                 match_task = calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding) if job_description else None
@@ -147,20 +158,22 @@ async def upload_resumes(
                 else:
                     embedding, match_score = await embedding_task, 0.0
 
-                # 4. Save to MongoDB
+                # 6. SAVE TO MONGODB
                 relative_url = f"/uploads/{file_name}"
-                await db.db["resumes"].insert_one({
+                await db.db["recruiter's resume"].insert_one({
+                    "identity_hash": identity_hash,
+                    "filename": file.filename,
                     "resumeURL": relative_url,
                     "extracted_data": parsed_data.dict(),
                     "embedding": embedding,
                     "updated_at": uuid.uuid4().hex
                 })
                 
-                logger.info(f"PERF: {file.filename} - Total {round(time.time() - start_time, 2)}s")
                 return {
                     "filename": file.filename,
                     "status": "success",
                     "match_score": match_score,
+                    "identity_hash": identity_hash,
                     "resumeURL": f"{settings.BASE_URL}{relative_url}"
                 }
             except Exception as e:
@@ -170,9 +183,9 @@ async def upload_resumes(
 
     tasks = [process_single_file(file) for file in files]
     results = await asyncio.gather(*tasks)
-    
-    logger.info(f"Batch completed in {round(time.time() - upload_start, 2)}s")
     return results
+
+from recruiter.utils.location_manager import loc_manager
 
 @router.get("/search")
 async def search_resumes(
@@ -183,7 +196,7 @@ async def search_resumes(
     education: Optional[str] = None,
     job_title: Optional[str] = None,
     match_all: bool = Query(False),
-    limit: int = 10
+    limit: int = 1000
 ):
     mongo_filter = {}
     combined_filters = []
@@ -200,12 +213,24 @@ async def search_resumes(
             conditions = [{"extracted_data.skills": {"$regex": get_strict_skill_regex(s), "$options": "i"}} for s in skill_list]
             combined_filters.append({"$and" if match_all else "$or": conditions})
 
+    # --- Dynamic AI-Driven Location Search ---
+    search_loc_parts = []
     if location and is_valid_location_query(location):
-        clean_loc = normalize_val(location)
-        words = [re.escape(w) for w in clean_loc.split() if len(w) >= 2]
-        if words:
-            loc_pattern = "|".join(words)
-            combined_filters.append({"extracted_data.location": {"$regex": loc_pattern, "$options": "i"}})
+        # AI will have stored these fields. We match the query against any of them.
+        loc_clean = re.escape(location.strip())
+        search_loc_parts = [p.strip() for p in location.split(",")]
+        
+        loc_conditions = []
+        for part in search_loc_parts:
+            p_esc = re.escape(part)
+            loc_conditions.extend([
+                {"extracted_data.city": {"$regex": f"^{p_esc}$", "$options": "i"}},
+                {"extracted_data.state": {"$regex": f"^{p_esc}$", "$options": "i"}},
+                {"extracted_data.country": {"$regex": f"^{p_esc}$", "$options": "i"}}
+            ])
+        
+        if loc_conditions:
+            combined_filters.append({"$or": loc_conditions})
 
     if job_title:
         token_groups = tokenize_and_expand_job(job_title)
@@ -217,26 +242,40 @@ async def search_resumes(
         mongo_filter["$and" if len(combined_filters) > 1 else None] = combined_filters if len(combined_filters) > 1 else combined_filters[0]
         if None in mongo_filter: mongo_filter = combined_filters[0]
 
-    all_resumes = await db.db["resumes"].find(mongo_filter).to_list(length=100)
+    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).to_list(length=limit)
     
     scored_results = []
-    if job_title or skills or location:
-        search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
-        query_embedding = await embedding_service.generate_embedding(search_query)
-        for res in all_resumes:
-            if "embedding" in res:
-                a, b = np.array(query_embedding), np.array(res["embedding"])
-                similarity = np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-                res["match_score"] = float(round(similarity * 100, 2))
-                res["_id"] = str(res["_id"])
-                if res["resumeURL"].startswith("/uploads/"): res["resumeURL"] = f"{settings.BASE_URL}{res['resumeURL']}"
-                res.pop("embedding", None)
-                scored_results.append(res)
-        return rank_job_results(scored_results, job_title)[:limit]
+    search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
+    query_embedding = await embedding_service.generate_embedding(search_query) if (job_title or skills or location) else None
 
     for res in all_resumes:
         res["_id"] = str(res["_id"])
         if res["resumeURL"].startswith("/uploads/"): res["resumeURL"] = f"{settings.BASE_URL}{res['resumeURL']}"
+        
+        # 1. AI Vector Score
+        vector_score = 0.0
+        if query_embedding and "embedding" in res:
+            a, b = np.array(query_embedding), np.array(res["embedding"])
+            vector_score = float(round((np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))) * 100, 2))
+        
+        # 2. Location Match Score (Multiplier)
+        loc_boost = 1.0
+        if search_loc_parts:
+            res_data = res.get("extracted_data", {})
+            # If any part matches city, state, or country, give full boost
+            res_loc_values = [
+                res_data.get("city", "").lower(), 
+                res_data.get("state", "").lower(), 
+                res_data.get("country", "").lower()
+            ]
+            if any(p.lower() in res_loc_values for p in search_loc_parts):
+                loc_boost = 1.2 # Give 20% boost for location relevance
+        
+        res["match_score"] = vector_score * loc_boost
         res.pop("embedding", None)
-        res["match_score"] = 0.0
-    return all_resumes[:limit]
+        scored_results.append(res)
+
+    if job_title or skills or location:
+        return rank_job_results(scored_results, job_title)
+
+    return all_resumes
