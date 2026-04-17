@@ -199,7 +199,8 @@ async def search_resumes(
     education: Optional[str] = None,
     job_title: Optional[str] = None,
     match_all: bool = Query(False),
-    limit: int = 1000
+    skip: int = 0,
+    limit: int = 10
 ):
     mongo_filter = {}
     combined_filters = []
@@ -247,7 +248,8 @@ async def search_resumes(
         else:
             mongo_filter = combined_filters[0]
 
-    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).to_list(length=limit)
+    # Fetch all matching resumes to ensure global ranking
+    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).to_list(length=10000)
     
     scored_results = []
     search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
@@ -280,7 +282,22 @@ async def search_resumes(
         res.pop("embedding", None)
         scored_results.append(res)
 
+    # Sort results if searching (to maintain ranking)
     if job_title or skills or location:
-        return rank_job_results(scored_results, job_title)
+        final_list = rank_job_results(scored_results, job_title)
+    else:
+        # Sort by updated_at or similar if no search query? 
+        # For now, keep as is (scored_results is just all_resumes processed)
+        final_list = scored_results
 
-    return all_resumes
+    total_count = len(final_list)
+    paginated_results = final_list[skip : skip + limit]
+
+    return {
+        "total": total_count,
+        "skip": skip,
+        "limit": limit,
+        "has_more": (skip + limit) < total_count,
+        "results": paginated_results
+    }
+
