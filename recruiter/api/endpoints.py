@@ -47,8 +47,9 @@ JOB_SYNONYMS = {
 # --- HELPERS ---
 
 def get_strict_skill_regex(skill: str):
-    escaped = re.escape(skill.lower())
-    return f"(^|[ /]){escaped}($|[ /\\.]|js)"
+    # Flexible substring match: Removed all strict boundaries (^, $, /)
+    # This ensures MongoDB acts as a 'Wide Net' to fetch anything remotely relevant
+    return re.escape(skill.lower())
 
 def normalize_val(val: str) -> str:
     if not val: return ""
@@ -212,10 +213,26 @@ async def search_resumes(
         combined_filters.append({"extracted_data.experience": exp_filter})
 
     if skills:
-        skill_list = [s.strip().lower() for s in skills.split(",") if s.strip()]
-        if skill_list:
-            conditions = [{"extracted_data.skills": {"$regex": get_strict_skill_regex(s), "$options": "i"}} for s in skill_list]
-            combined_filters.append({"$and" if match_all else "$or": conditions})
+        # Split skills by comma first
+        skill_queries = [s.strip().lower() for s in skills.split(",") if s.strip()]
+        all_conditions = []
+        
+        for s_query in skill_queries:
+            # For each skill query, split by space to handle multi-word skills like "health care"
+            sub_parts = s_query.split()
+            if not sub_parts: continue
+            
+            # Create a regex that matches ANY of the words in the multi-word skill
+            # e.g. "health care" -> matches anything with "health" OR "care"
+            sub_conditions = [{"extracted_data.skills": {"$regex": get_strict_skill_regex(part), "$options": "i"}} for part in sub_parts]
+            
+            if len(sub_conditions) > 1:
+                all_conditions.append({"$or": sub_conditions})
+            else:
+                all_conditions.append(sub_conditions[0])
+
+        if all_conditions:
+            combined_filters.append({"$and" if match_all else "$or": all_conditions})
 
     # --- Dynamic AI-Driven Location Search ---
     search_loc_parts = []
@@ -226,10 +243,11 @@ async def search_resumes(
         loc_conditions = []
         for part in search_loc_parts:
             p_esc = re.escape(part)
+            # Relaxed: Removed ^ and $ to allow partial matching (e.g., "New York" matches "New York City")
             loc_conditions.extend([
-                {"extracted_data.city": {"$regex": f"^{p_esc}$", "$options": "i"}},
-                {"extracted_data.state": {"$regex": f"^{p_esc}$", "$options": "i"}},
-                {"extracted_data.country": {"$regex": f"^{p_esc}$", "$options": "i"}}
+                {"extracted_data.city": {"$regex": p_esc, "$options": "i"}},
+                {"extracted_data.state": {"$regex": p_esc, "$options": "i"}},
+                {"extracted_data.country": {"$regex": p_esc, "$options": "i"}}
             ])
         
         if loc_conditions:
