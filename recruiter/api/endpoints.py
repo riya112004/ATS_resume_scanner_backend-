@@ -189,7 +189,7 @@ async def upload_resumes(
     results = await asyncio.gather(*tasks)
     return results
 
-from recruiter.utils.location_manager import loc_manager
+from math import ceil
 
 @router.get("/search")
 async def search_resumes(
@@ -200,8 +200,8 @@ async def search_resumes(
     education: Optional[str] = None,
     job_title: Optional[str] = None,
     match_all: bool = Query(False),
-    skip: int = 0,
-    limit: int = 10
+    current_page: int = Query(1, ge=1),
+    limit: int = Query(10, ge=1, le=100)
 ):
     mongo_filter = {}
     combined_filters = []
@@ -266,7 +266,7 @@ async def search_resumes(
         else:
             mongo_filter = combined_filters[0]
 
-    # Fetch all matching resumes to ensure global ranking
+    # Fetch all matching resumes to ensure global ranking (due to custom sorting logic in Python)
     all_resumes = await db.db["recruiter's resume"].find(mongo_filter).to_list(length=10000)
     
     scored_results = []
@@ -304,18 +304,27 @@ async def search_resumes(
     if job_title or skills or location:
         final_list = rank_job_results(scored_results, job_title)
     else:
-        # Sort by updated_at or similar if no search query? 
-        # For now, keep as is (scored_results is just all_resumes processed)
         final_list = scored_results
 
+    # --- Page-based Pagination Logic ---
     total_count = len(final_list)
-    paginated_results = final_list[skip : skip + limit]
+    total_pages = ceil(total_count / limit) if total_count > 0 else 1
+    
+    # Calculate slice indices
+    start_idx = (current_page - 1) * limit
+    end_idx = start_idx + limit
+    
+    paginated_results = final_list[start_idx : end_idx]
 
     return {
-        "total": total_count,
-        "skip": skip,
-        "limit": limit,
-        "has_more": (skip + limit) < total_count,
+        "metadata": {
+            "total_records": total_count,
+            "total_pages": total_pages,
+            "current_page": current_page,
+            "limit": limit,
+            "has_next": current_page < total_pages,
+            "has_previous": current_page > 1
+        },
         "results": paginated_results
     }
 

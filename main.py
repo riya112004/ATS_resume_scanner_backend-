@@ -5,35 +5,35 @@ from recruiter.api.endpoints import router as api_router
 from seeker.api.endpoints import router as seeker_router
 from recruiter.core.database import db
 from recruiter.core.config import settings
+from contextlib import asynccontextmanager
+import os
+from fastapi.responses import Response, FileResponse
 
-app = FastAPI(title=settings.PROJECT_NAME)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Connect to DB
+    db.connect_to_mongo()
+    yield
+    # Shutdown: Close DB
+    db.close_mongo_connection()
+
+app = FastAPI(title=settings.PROJECT_NAME, lifespan=lifespan)
 
 # Enable CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"], # Allows all methods (GET, POST, etc.)
-    allow_headers=["*"], # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Mount uploads folder as static to serve files
+# Mount uploads
 app.mount("/uploads", StaticFiles(directory=settings.UPLOAD_DIR), name="uploads")
 
 # Include API routes
 app.include_router(api_router, prefix="/api")
 app.include_router(seeker_router, prefix="/seeker-api")
-
-@app.on_event("startup")
-async def startup_db_client():
-    db.connect_to_mongo()
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    db.close_mongo_connection()
-
-from fastapi.responses import FileResponse, Response
-import os
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
