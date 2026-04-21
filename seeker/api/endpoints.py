@@ -140,7 +140,7 @@ async def analyze_seeker_resume(
             "candidate_email": email,
             "job_title": job_title,
             "resume_filename": resume_file.filename,
-            "resume_url": f"{settings.BASE_URL}{relative_url}",
+            "resume_url": relative_url, # SAVED AS RELATIVE PATH
             "job_description": job_description,
             "ats_score": overall_score,
             "status": "completed",
@@ -165,7 +165,7 @@ async def analyze_seeker_resume(
                 "missing_critical_skills": analysis_data.get("missing_critical_skills", []),
                 "warnings": analysis_data.get("warnings", []),
                 "verdict": analysis_data.get("verdict", ""),
-                "resume_url": f"{settings.BASE_URL}{relative_url}"
+                "resume_url": f"{settings.BASE_URL}{relative_url}" # RETURNED AS FULL URL FOR FRONTEND
             }
         }
 
