@@ -1,151 +1,178 @@
 import os
 import uuid
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
-from typing import List, Optional
+import logging
+import time
+import re
+from datetime import datetime
+from typing import Optional
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 from recruiter.core.config import settings
 from recruiter.utils.extractor import extract_text_from_file
-from recruiter.services.parser import parser
-from recruiter.services.matching import calculate_match_score
-from seeker.services.feedback import seeker_service
-
-from recruiter.services.embeddings import embedding_service
 from recruiter.core.database import db
+from seeker.services.analysis_manager import analysis_manager
 
 router = APIRouter()
 
-@router.post("/resumes/upload")
-async def upload_and_parse_resume(
-    file: UploadFile = File(...),
-    job_description: Optional[str] = Form(None)
-):
-    """
-    1. Resume Upload + Parsing
-    Upload resume + parse + generate embedding + store in DB + return structured JSON
-    """
-    # 1. Save file locally
-    file_id = str(uuid.uuid4())
-    _, ext = os.path.splitext(file.filename)
-    file_name = f"seeker_{file_id}{ext}"
-    file_path = os.path.join(settings.UPLOAD_DIR, file_name)
-    
-    try:
-        content = await file.read()
-        with open(file_path, "wb") as buffer:
-            buffer.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
-    
-    try:
-        raw_text = await extract_text_from_file(file_path)
-        parsed_data = await parser.parse_resume_text(raw_text)
-        
-        text_for_embedding = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)} Experience: {parsed_data.experience} years"
-        embedding = await embedding_service.generate_embedding(text_for_embedding.strip())
-        
-        match_score = None
-        feedback = None
-        if job_description:
-            match_score = await calculate_match_score(raw_text, job_description)
-            feedback = await seeker_service.get_resume_feedback(raw_text, job_description)
+# Configure Seeker Specific Logger
+logger = logging.getLogger("seeker_api")
+logger.setLevel(logging.INFO)
 
-        # 6. Save to MongoDB (Use relative URL)
-        relative_resume_url = f"/uploads/{file_name}"
-        resume_doc = {
-            "resumeURL": relative_resume_url,
-            "extracted_data": parsed_data.dict(),
-            "embedding": embedding,
-            "status": "seeker_upload",
-            "updated_at": uuid.uuid4().hex
-        }
-        
-        # --- DUPLICATE CHECK (Email or Phone) ---
-        email = str(parsed_data.email).strip().lower() if parsed_data.email else None
-        phone = re.sub(r"\D", "", str(parsed_data.phone_number)) if parsed_data.phone_number else None
-        
-        query_parts = []
-        if email:
-            query_parts.append({"extracted_data.email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}})
-        if phone:
-            phone_regex = "".join([f"{c}[^0-9]*" for c in phone])
-            query_parts.append({"extracted_data.phone_number": {"$regex": phone_regex}})
-        
-        existing = None
-        if query_parts:
-            existing = await db.db["seeker_resumes"].find_one({"$or": query_parts})
-        
-        if existing:
-            # Delete the newly uploaded file as it is a duplicate
-            if os.path.exists(file_path): os.remove(file_path)
-            raise HTTPException(status_code=400, detail="Resume already exists.")
-        
-        result = await db.db["seeker_resumes"].insert_one(resume_doc)
-        db_id = str(result.inserted_id)
-        
-        # Return structured JSON (Full URL for client)
-        return {
-            "_id": db_id,
-            "filename": file.filename,
-            "is_update": True if existing else False,
-            "resume_url": f"{settings.BASE_URL}{relative_resume_url}",
-            "structured_data": parsed_data.dict(),
-            "analysis": {
-                "match_score": match_score,
-                "feedback": feedback.dict() if feedback else None
-            }
-        }
-    except Exception as e:
-        if os.path.exists(file_path): os.remove(file_path)
-        raise HTTPException(status_code=500, detail=str(e))
+MAX_FILE_SIZE = 5 * 1024 * 1024
+ALLOWED_EXTENSIONS = {".pdf", ".docx"}
+ALLOWED_MIME_TYPES = {"application/pdf", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
+
+def validate_jd(jd_text: str):
+    """
+    Robust validation for Job Description.
+    Checks for length, word count, alphabetic ratio, and repetition.
+    """
+    if not jd_text or len(jd_text.strip()) < 100:
+        raise HTTPException(status_code=400, detail="Job description is too short. Please provide at least 100 characters.")
+
+    # 1. Word Count Check
+    words = re.findall(r'\w+', jd_text.lower())
+    if len(words) < 20:
+        raise HTTPException(status_code=400, detail="Job description is too vague. Please provide more details about the role.")
+
+    # 2. Alphabetic Ratio Check (Ensure it's not just numbers or symbols)
+    alpha_chars = sum(c.isalpha() for c in jd_text)
+    if alpha_chars / len(jd_text) < 0.6:
+        raise HTTPException(status_code=400, detail="Job description contains too many non-alphabetic characters.")
+
+    # 3. Repeated Text Detection
+    from collections import Counter
+    word_counts = Counter(words)
+    if word_counts:
+        most_common_word, count = word_counts.most_common(1)[0]
+        if count / len(words) > 0.3 and len(words) > 30:
+            raise HTTPException(status_code=400, detail="Job description contains repetitive text.")
 
 @router.post("/analyze")
-async def analyze_resume(
-    file: UploadFile = File(...),
-    job_description: Optional[str] = Form(None)
+async def analyze_seeker_resume(
+    job_description: str = Form(...),
+    job_title: Optional[str] = Form("Job Role"),
+    candidate_experience: Optional[float] = Form(None), 
+    resume_file: UploadFile = File(...)
 ):
-    """
-    Analyzes a seeker's resume and provides feedback or matching score.
-    """
-    # 1. Save file temporarily
-    file_id = str(uuid.uuid4())
-    _, ext = os.path.splitext(file.filename)
-    file_name = f"seeker_{file_id}{ext}"
+    request_id = str(uuid.uuid4())
+    start_time = time.time()
+    logger.info(f"[{request_id}] START - Analysis request for file: {resume_file.filename}")
+    
+    # 1. Robust JD Validation
+    try:
+        validate_jd(job_description)
+    except HTTPException as e:
+        logger.warning(f"[{request_id}] VALIDATION FAILED - JD Validation: {e.detail}")
+        raise
+
+    # Candidate Experience Validation
+    if candidate_experience is not None:
+        if candidate_experience < 0 or candidate_experience > 60:
+            logger.warning(f"[{request_id}] VALIDATION FAILED - Invalid experience: {candidate_experience}")
+            raise HTTPException(status_code=400, detail="Invalid candidate_experience. Must be between 0 and 60.")
+
+    # 2. File Check
+    _, ext = os.path.splitext(resume_file.filename)
+    if ext.lower() not in ALLOWED_EXTENSIONS:
+        logger.warning(f"[{request_id}] VALIDATION FAILED - Invalid extension: {ext}")
+        raise HTTPException(status_code=415, detail="Only PDF/DOCX allowed.")
+
+    if resume_file.content_type not in ALLOWED_MIME_TYPES:
+        logger.warning(f"[{request_id}] VALIDATION FAILED - Invalid MIME type: {resume_file.content_type}")
+        raise HTTPException(status_code=415, detail="Invalid file type. Only PDF and DOCX are allowed.")
+
+    file_name = f"seeker_{request_id}{ext}"
     file_path = os.path.join(settings.UPLOAD_DIR, file_name)
     
     try:
-        content = await file.read()
+        # 3. Save File
+        content = await resume_file.read()
+        logger.info(f"[{request_id}] STEP 1 - File read. Size: {len(content)} bytes")
+        
+        # File Size Validation
+        if len(content) > MAX_FILE_SIZE:
+            logger.warning(f"[{request_id}] VALIDATION FAILED - File too large: {len(content)} bytes")
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, 
+                detail=f"File too large. Maximum size allowed is {MAX_FILE_SIZE // (1024 * 1024)}MB."
+            )
+
         with open(file_path, "wb") as buffer:
             buffer.write(content)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Could not save file: {str(e)}")
-    
-    # 2. Extract text from file
-    try:
+        
+        # 4. Text Extraction
+        logger.info(f"[{request_id}] STEP 2 - Extracting text...")
         raw_text = await extract_text_from_file(file_path)
-        if not raw_text or len(raw_text.strip()) < 10:
-            raise ValueError("Extracted text is too short or empty.")
+        if not raw_text or len(raw_text.strip()) < 50:
+             logger.error(f"[{request_id}] EXTRACTION FAILED - Text too short or empty.")
+             raise ValueError("Could not extract text.")
+        logger.info(f"[{request_id}] STEP 3 - Text extracted. Length: {len(raw_text)} chars")
+
+        # 5. Orchestrate Analysis
+        logger.info(f"[{request_id}] STEP 4 - Starting AI Analysis Pipeline...")
+        try:
+            analysis_data = await analysis_manager.analyze(
+                raw_text, 
+                job_title, 
+                job_description, 
+                candidate_experience=candidate_experience
+            )
+            logger.info(f"[{request_id}] STEP 5 - AI Analysis Completed.")
+        except ValueError as ve:
+            logger.error(f"[{request_id}] ANALYSIS FAILED - {str(ve)}")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+                detail=f"Analysis failed: {str(ve)}. Please ensure the resume file is readable and follows a standard format."
+            )
+
+        # 6. Database Storage
+        parsed_resume = analysis_data.get("parsed_resume", {})
+        contact_info = parsed_resume.get("contact", {})
+        
+        name = contact_info.get("name", "Unknown")
+        email = contact_info.get("email", "Not Found")
+        overall_score = analysis_data.get("overall_ats_score", 0)
+        relative_url = f"/uploads/{file_name}"
+
+        analysis_record = {
+            "analysis_id": request_id,
+            "candidate_name": name,
+            "candidate_email": email,
+            "job_title": job_title,
+            "resume_filename": resume_file.filename,
+            "resume_url": f"{settings.BASE_URL}{relative_url}",
+            "job_description": job_description,
+            "ats_score": overall_score,
+            "status": "completed",
+            "created_at": datetime.utcnow()
+        }
+        await db.db["seeker_analysis_history"].insert_one(analysis_record)
+        logger.info(f"[{request_id}] STEP 6 - Record saved to MongoDB for {name}")
+
+        duration = time.time() - start_time
+        logger.info(f"[{request_id}] SUCCESS - Analysis finished in {duration:.2f}s")
+
+        # 7. Simplified Response (Include ATS score, exclude breakdown)
+        return {
+            "success": True,
+            "message": "Resume analyzed and candidate details saved successfully.",
+            "data": {
+                "candidate_name": name,
+                "candidate_email": email,
+                "overall_ats_score": overall_score,
+                "improvements": analysis_data.get("improvement_points", []),
+                "matched_skills": analysis_data.get("matched_skills", []),
+                "missing_critical_skills": analysis_data.get("missing_critical_skills", []),
+                "warnings": analysis_data.get("warnings", []),
+                "verdict": analysis_data.get("verdict", ""),
+                "resume_url": f"{settings.BASE_URL}{relative_url}"
+            }
+        }
+
+    except HTTPException:
+        # Re-raise FastAPI HTTP exceptions so they reach the client as intended
+        raise
     except Exception as e:
+        logger.error(f"[{request_id}] CRITICAL SYSTEM ERROR - {str(e)}")
         if os.path.exists(file_path): os.remove(file_path)
-        raise HTTPException(status_code=400, detail=f"Text extraction failed: {str(e)}")
-    
-    # 3. Parse resume with AI
-    try:
-        parsed_data = await parser.parse_resume_text(raw_text)
-    except Exception as e:
-        if os.path.exists(file_path): os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"AI Parsing failed: {str(e)}")
-    
-    # 4. Calculate match score and get feedback if JD is provided
-    match_score = None
-    feedback = None
-    if job_description:
-        match_score = await calculate_match_score(raw_text, job_description)
-        feedback = await seeker_service.get_resume_feedback(raw_text, job_description)
-    
-    return {
-        "status": "success",
-        "filename": file.filename,
-        "parsed_data": parsed_data.dict(),
-        "match_score": match_score,
-        "feedback": feedback.dict() if feedback else None,
-        "resumeURL": f"{settings.BASE_URL}/uploads/{file_name}"
-    }
+        raise HTTPException(status_code=500, detail="Internal server error occurred.")

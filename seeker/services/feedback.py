@@ -1,58 +1,46 @@
-import json
-from openai import AsyncOpenAI
-from pydantic import BaseModel
-from typing import List
-from recruiter.core.config import settings
+from typing import List, Dict
+from seeker.models.analysis_schema import ParsedResume, ParsedJD, ScoreBreakdown
 
-class SeekerFeedback(BaseModel):
-    missing_keywords: List[str]
-    optimization_tips: List[str]
-    is_compatible: bool
-    final_verdict: str
-
-class SeekerService:
-    def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-
-    async def get_resume_feedback(self, resume_text: str, job_description: str) -> SeekerFeedback:
-        """Generates ATS feedback and optimization tips for the seeker."""
-        prompt = f"""
-        Compare the following resume text against the job description provided.
-        Identify missing keywords, provide specific optimization tips to improve the ATS score, 
-        and give a final verdict on compatibility.
-        
-        Return ONLY a JSON object with these EXACT keys (all lowercase):
-        - missing_keywords (list of strings)
-        - optimization_tips (list of strings)
-        - is_compatible (boolean)
-        - final_verdict (string, max 200 characters)
-
-        Resume:
-        {resume_text[:3000]}
-
-        Job Description:
-        {job_description[:3000]}
+class FeedbackService:
+    def generate_improvements(
+        self, 
+        parsed_resume: ParsedResume, 
+        parsed_jd: ParsedJD, 
+        breakdown: ScoreBreakdown,
+        missing_skills: List[str],
+        role_alignment: float
+    ) -> List[str]:
         """
+        Generates actionable improvement points based on the analysis results.
+        Single source of truth for all seeker feedback.
+        """
+        improvements = []
         
-        try:
-            response = await self.client.chat.completions.create(
-                model="gpt-3.5-turbo-0125",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                response_format={"type": "json_object"}
-            )
-            
-            content = response.choices[0].message.content
-            feedback_data = json.loads(content)
-            
-            return SeekerFeedback(**feedback_data)
-        except Exception as e:
-            print(f"Error getting seeker feedback: {e}")
-            return SeekerFeedback(
-                missing_keywords=[],
-                optimization_tips=["Could not generate tips at this moment."],
-                is_compatible=False,
-                final_verdict="Error during analysis."
-            )
+        # 1. Skill Gaps
+        if missing_skills:
+            top_missing = [s.title() for s in missing_skills[:5]]
+            improvements.append(f"Missing Keywords: Add {', '.join(top_missing)} to your skills section.")
+        
+        # 2. Experience Optimization
+        if parsed_resume.experience_years < parsed_jd.min_experience:
+            gap = round(parsed_jd.min_experience - parsed_resume.experience_years, 1)
+            improvements.append(f"Experience Gap: The JD asks for {parsed_jd.min_experience} years, but you have {parsed_resume.experience_years} years. Highlight transferable skills to bridge this {gap} year gap.")
+        
+        # 3. Role & Project Alignment
+        if role_alignment < 70:
+            improvements.append(f"Role Alignment: Your recent experience as a '{parsed_resume.work_history[0].role if parsed_resume.work_history else 'Unknown'}' doesn't strongly reflect a '{parsed_jd.role}' role. Update your professional summary to use this title.")
+        
+        if parsed_resume.projects and breakdown.project_relevance is not None and breakdown.project_relevance < 60:
+            improvements.append("Optimization Tip: Use more bullet points in your project descriptions that quantify achievements (e.g., 'Reduced costs by 20%').")
 
-seeker_service = SeekerService()
+        # 4. Domain Keywords
+        if breakdown.keyword_coverage < 50:
+             improvements.append("Domain Optimization: Incorporate more industry-specific terminology found in the Job Description.")
+
+        # 5. ATS Readability
+        if breakdown.formatting_readability < 80:
+             improvements.append("Formatting Tip: Ensure your resume uses a single-column layout and standard font to avoid ATS parsing errors.")
+
+        return improvements
+
+feedback_service = FeedbackService()

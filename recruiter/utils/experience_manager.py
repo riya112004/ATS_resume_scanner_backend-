@@ -10,34 +10,40 @@ class ExperienceCalculator:
     """
 
     @staticmethod
-    def normalize_date(date_str: str) -> datetime:
+    def normalize_date(date_str: str) -> Optional[datetime]:
         """
-        Normalizes various string formats into a datetime object.
-        Handles 'Present', 'Current', and various date string variations.
+        Strictly normalizes date strings. Returns None if unparseable.
         """
-        if not date_str or any(word in date_str.lower() for word in ["present", "current", "now"]):
+        if not date_str:
+            return None
+        
+        # Check for explicit "Present" indicators
+        if any(word in str(date_str).lower() for word in ["present", "current", "now", "today"]):
             return datetime.now()
         
         try:
-            return date_parser.parse(date_str)
+            parsed_date = date_parser.parse(str(date_str))
+            # Safety: If date is in the far future (AI error), treat as invalid
+            if parsed_date.year > datetime.now().year + 1:
+                return None
+            return parsed_date
         except (ValueError, TypeError):
-            return datetime.now()
+            return None
 
     @staticmethod
     def calculate_months(start: datetime, end: datetime) -> int:
         """Calculates total months between two dates, inclusive."""
-        if start > end:
+        if not start or not end or start > end:
             return 0
         # Total months = (years * 12) + months + 1 (to include the start/end month)
         return (end.year - start.year) * 12 + (end.month - start.month) + 1
 
     def calculate_total_experience(self, experience_entries: List[Dict]) -> Dict:
         """
-        Main engine logic:
-        1. Normalizes all entries.
-        2. Sorts by start date.
-        3. Merges overlapping or touching intervals.
-        4. Calculates final totals in multiple formats.
+        Logic with strict validation:
+        1. Skips entries with invalid start/end dates.
+        2. Only allows 'now' for current roles.
+        3. Merges overlapping ranges correctly.
         """
         if not experience_entries:
             return self._empty_response()
@@ -50,15 +56,21 @@ class ExperienceCalculator:
             start = self.normalize_date(start_str)
             end = self.normalize_date(end_str)
             
-            # Basic validation: ensure start <= end
+            # CRITICAL FIX: Skip if start or end date is missing or invalid
+            if not start or not end:
+                continue
+                
+            # Ensure start <= end
             if start > end:
                 start, end = end, start
                 
             processed_intervals.append({
                 "start": start,
-                "end": end,
-                "company": entry.get("company", "Unknown")
+                "end": end
             })
+
+        if not processed_intervals:
+            return self._empty_response()
 
         # Step 1: Sort intervals by start date
         processed_intervals.sort(key=lambda x: x["start"])
