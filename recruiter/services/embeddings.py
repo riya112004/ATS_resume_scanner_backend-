@@ -1,21 +1,26 @@
-from openai import AsyncOpenAI
+import asyncio
 from typing import List
-from recruiter.core.config import settings
+from sentence_transformers import SentenceTransformer
 
 class EmbeddingService:
     def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        # 'all-MiniLM-L6-v2' is a fast, accurate, and lightweight local model.
+        # It runs entirely on your server for FREE.
+        # Note: On first run, it will automatically download the model (~80MB).
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
 
     async def generate_embedding(self, text: str) -> List[float]:
-        """Generates an embedding for a given text."""
+        """Generates an embedding locally using sentence-transformers."""
+        if not text:
+            return []
+            
         try:
-            response = await self.client.embeddings.create(
-                input=text,
-                model=settings.EMBEDDING_MODEL
-            )
-            return response.data[0].embedding
+            # Running the blocking 'encode' function in a thread to keep the API responsive
+            loop = asyncio.get_event_loop()
+            embedding = await loop.run_in_executor(None, lambda: self.model.encode(text))
+            return embedding.tolist()
         except Exception as e:
-            print(f"Error generating embedding: {e}")
-            raise ValueError(f"Failed to generate embedding: {str(e)}")
+            print(f"Local Embedding Generation Error: {e}")
+            return []
 
 embedding_service = EmbeddingService()

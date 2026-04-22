@@ -48,7 +48,7 @@ class SeekerResumeParser:
 
         try:
             response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
+                model=settings.AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 response_format={"type": "json_object"}

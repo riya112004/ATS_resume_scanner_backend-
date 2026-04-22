@@ -1,57 +1,52 @@
-import json
-from openai import AsyncOpenAI
-from recruiter.core.config import settings
+import re
+from typing import List
 from seeker.models.analysis_schema import ParsedJD
+from seeker.services.normalization import normalizer
 
-class JDParser:
-    def __init__(self):
-        self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+class LocalJDParser:
+    """
+    100% FREE Local JD Parser. 
+    Uses Regex and Healthcare Mappings instead of OpenAI.
+    """
+    
+    def extract_experience(self, text: str) -> float:
+        # Regex to find patterns like "3+ years", "5 years", "2-4 years"
+        patterns = [
+            r'(\d+)\+?\s*(?:year|yr)s?',
+            r'(\d+)\s*(?:to|-)\s*(\d+)\s*(?:year|yr)s?'
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text.lower())
+            if match:
+                return float(match.group(1))
+        return 0.0
+
+    def extract_skills(self, text: str) -> List[str]:
+        # Scan JD text against our healthcare skill dictionary
+        found_skills = []
+        text_lower = text.lower()
+        
+        # Use existing healthcare mappings from normalizer
+        for skill_key in normalizer.SKILL_MAPPINGS.keys():
+            if f" {skill_key} " in f" {text_lower} " or text_lower.startswith(skill_key):
+                found_skills.append(normalizer.SKILL_MAPPINGS[skill_key])
+        
+        return list(set(found_skills))
 
     async def parse(self, title: str, description: str) -> ParsedJD:
-        prompt = f"""
-        Analyze the following Job Title and Job Description.
-        Extract hiring signals and structure them. 
-        CLEANING RULE: Remove redundant phrases like "passionate about", "competitive salary", or company history. Focus ONLY on candidate requirements.
+        # Extract basic info locally
+        skills = self.extract_skills(description)
+        exp = self.extract_experience(description)
+        
+        # Build ParsedJD object
+        return ParsedJD(
+            role=title,
+            must_have_skills=skills[:8], # Top 8 skills
+            preferred_skills=skills[8:12],
+            min_experience=exp,
+            education_requirements=["Associate" if "associate" in description.lower() else "Bachelors"],
+            domain_keywords=["Healthcare"],
+            raw_text=description
+        )
 
-        Return ONLY a JSON object with these keys:
-        - role (standardized job title)
-        - must_have_skills (critical hard skills/languages/frameworks)
-        - preferred_skills (plus points or nice-to-have)
-        - tools_and_tech (list of specific softwares/tools: e.g. 'Docker', 'AWS', 'Jira')
-        - soft_skills (e.g. 'Leadership', 'Communication')
-        - responsibilities (list of core job duties)
-        - min_experience (numeric years, 0 if not specified)
-        - education_requirements (list of degrees: e.g., 'Bachelors', 'Masters')
-        - domain_keywords (core industry terms: e.g., 'Fintech', 'SaaS', 'Healthcare')
-
-        Job Title: {title}
-        Job Description: {description}
-        """
-
-        try:
-            response = await self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0,
-                response_format={"type": "json_object"}
-            )
-            
-            raw = json.loads(response.choices[0].message.content)
-            
-            # Combine hard skills and tools for a broader comparison base if needed
-            must_haves = [s.lower().strip() for s in raw.get("must_have_skills", []) if s]
-            
-            return ParsedJD(
-                role=raw.get("role") or title,
-                must_have_skills=must_haves,
-                preferred_skills=[s.lower().strip() for s in raw.get("preferred_skills", []) if s],
-                min_experience=float(raw.get("min_experience", 0)),
-                education_requirements=raw.get("education_requirements", []),
-                domain_keywords=[k.lower().strip() for k in raw.get("domain_keywords", []) if k],
-                raw_text=description
-            )
-        except Exception as e:
-            # We raise a ValueError with a specific prefix so endpoint can catch and map to 422
-            raise ValueError(f"JD_STRUCTURE_ERROR: {str(e)}")
-
-jd_parser = JDParser()
+jd_parser = LocalJDParser()

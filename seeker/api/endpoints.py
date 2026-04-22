@@ -9,6 +9,7 @@ from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 from recruiter.core.config import settings
 from recruiter.utils.extractor import extract_text_from_file
 from recruiter.core.database import db
+from recruiter.services.embeddings import embedding_service
 from seeker.services.analysis_manager import analysis_manager
 
 router = APIRouter()
@@ -110,6 +111,10 @@ async def analyze_seeker_resume(
 
         # 5. Orchestrate Analysis
         logger.info(f"[{request_id}] STEP 4 - Starting AI Analysis Pipeline...")
+        
+        # GENERATE JD EMBEDDING (LOCAL)
+        jd_embedding = await embedding_service.generate_embedding(job_description)
+        
         try:
             analysis_data = await analysis_manager.analyze(
                 raw_text, 
@@ -142,6 +147,7 @@ async def analyze_seeker_resume(
             "resume_filename": resume_file.filename,
             "resume_url": relative_url, # SAVED AS RELATIVE PATH
             "job_description": job_description,
+            "jd_embedding": jd_embedding, # ADDED LOCAL EMBEDDING
             "ats_score": overall_score,
             "status": "completed",
             "created_at": datetime.utcnow()

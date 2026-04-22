@@ -66,7 +66,7 @@ class AIParser:
         
         try:
             response = await self.client.chat.completions.create(
-                model="gpt-3.5-turbo-0125",
+                model=settings.AI_MODEL,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0,
                 response_format={"type": "json_object"}
