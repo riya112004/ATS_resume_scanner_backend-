@@ -94,7 +94,7 @@ def rank_job_results(results: List[Dict], original_query: str) -> List[Dict]:
 from recruiter.utils.hashing import generate_identity_hash
 
 # --- SEMAPHORE (Limit concurrency) ---
-MAX_CONCURRENT_TASKS = 30
+MAX_CONCURRENT_TASKS = 5
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
 
 @router.post("/upload")
