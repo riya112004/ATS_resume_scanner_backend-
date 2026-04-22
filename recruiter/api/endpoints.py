@@ -124,15 +124,17 @@ async def upload_resumes(
                 with open(file_path, "wb") as buffer:
                     buffer.write(content)
                 
-                # 2. EXTRACTION & AI PARSING (Get Name/Email)
+                # 2. EXTRACTION & AI PARSING
+                logger.info(f"[{file_id}] STEP 2 - Extracting text and AI parsing...")
                 raw_text = await extract_text_from_file(file_path)
                 parsed_data = await parser.parse_resume_text(raw_text)
+                logger.info(f"[{file_id}] STEP 2 DONE - AI parsed for {parsed_data.name}")
                 
-                # 3. GENERATE IDENTITY HASH (Name + Email)
+                # 3. GENERATE IDENTITY HASH
                 identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
                 
                 # 4. ULTRA-STRICT DUPLICATE CHECK
-                # Search by: Hash OR exact email match (Fallback)
+                logger.info(f"[{file_id}] STEP 4 - Checking duplicates in MongoDB...")
                 duplicate_query = {
                     "$or": [
                         {"identity_hash": identity_hash},
@@ -142,7 +144,7 @@ async def upload_resumes(
                 
                 existing = await db.db["recruiter's resume"].find_one(duplicate_query)
                 if existing:
-                    logger.info(f"Duplicate found for {parsed_data.name}. Identity Hash: {identity_hash}")
+                    logger.info(f"[{file_id}] DUPLICATE - Found for {parsed_data.name}")
                     if os.path.exists(file_path): os.remove(file_path)
                     return {
                         "filename": file.filename,
@@ -153,16 +155,20 @@ async def upload_resumes(
                     }
 
                 # 5. AI TASKS (Parallel)
+                logger.info(f"[{file_id}] STEP 5 - Generating local embeddings and matching...")
                 parsed_text = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)}"
-                embedding_task = embedding_service.generate_embedding(parsed_text.strip())
-                match_task = calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding) if job_description else None
                 
-                if match_task:
-                    embedding, match_score = await asyncio.gather(embedding_task, match_task)
-                else:
-                    embedding, match_score = await embedding_task, 0.0
+                # We do this step-by-step for debugging
+                embedding = await embedding_service.generate_embedding(parsed_text.strip())
+                logger.info(f"[{file_id}] Embedding generated.")
+                
+                match_score = 0.0
+                if job_description:
+                    match_score = await calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding)
+                    logger.info(f"[{file_id}] Match score calculated: {match_score}")
 
                 # 6. SAVE TO MONGODB
+                logger.info(f"[{file_id}] STEP 6 - Saving to MongoDB...")
                 relative_url = f"/uploads/{file_name}"
                 await db.db["recruiter's resume"].insert_one({
                     "identity_hash": identity_hash,
@@ -172,6 +178,7 @@ async def upload_resumes(
                     "embedding": embedding,
                     "updated_at": uuid.uuid4().hex
                 })
+                logger.info(f"[{file_id}] STEP 6 DONE - Saved successfully.")
                 
                 return {
                     "filename": file.filename,
