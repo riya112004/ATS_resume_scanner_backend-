@@ -73,22 +73,44 @@ def tokenize_and_expand_job(query: str) -> List[List[str]]:
         token_groups.append(list(set(group)))
     return token_groups
 
-def rank_job_results(results: List[Dict], original_query: str) -> List[Dict]:
-    if not original_query: return results
-    q_lower = original_query.lower().strip()
-    
+def rank_job_results(results: List[Dict], original_query: str, skill_query: Optional[str] = None) -> List[Dict]:
+    # 1. Clean Skill Query
+    target_skills = []
+    if skill_query:
+        target_skills = [s.strip().lower() for s in skill_query.split(",") if s.strip()]
+
     for res in results:
-        title = normalize_val(res.get("extracted_data", {}).get("job_title", ""))
-        score = 0
-        if title == q_lower: score = 100
-        elif q_lower in title: score = 80
-        else:
-            tokens = q_lower.split()
-            if any(t in title for t in tokens): score = 50
-            else: score = 20
-        res["job_rank_score"] = score
+        # 2. Count Matched Skills
+        matched_count = 0
+        resume_skills = [s.lower() for s in res.get("extracted_data", {}).get("skills", [])]
+        for ts in target_skills:
+            if any(ts in rs for rs in resume_skills):
+                matched_count += 1
+        res["skill_match_count"] = matched_count
+
+        # 3. Job Title Score
+        title_score = 0
+        if original_query:
+            q_lower = original_query.lower().strip()
+            title = normalize_val(res.get("extracted_data", {}).get("job_title", ""))
+            if title == q_lower: title_score = 100
+            elif q_lower in title: title_score = 80
+            else:
+                tokens = q_lower.split()
+                if any(t in title for t in tokens): title_score = 50
+                else: title_score = 20
+        res["job_rank_score"] = title_score
         
-    results.sort(key=lambda x: (x.get("job_rank_score", 0), x.get("match_score", 0)), reverse=True)
+    # 4. Final MULTI-LEVEL Sort:
+    # Priority 1: Most Skills Matched (Descending: 4, 3, 2, 1...)
+    # Priority 2: Job Title Match (Highest first)
+    # Priority 3: Experience (Ascending: 0, 1, 2... - AS REQUESTED)
+    results.sort(key=lambda x: (
+        -x.get("skill_match_count", 0),
+        -x.get("job_rank_score", 0), 
+        x.get("extracted_data", {}).get("experience", 0),
+        -x.get("match_score", 0)
+    ))
     return results
 
 from recruiter.utils.hashing import generate_identity_hash
@@ -273,8 +295,9 @@ async def search_resumes(
         else:
             mongo_filter = combined_filters[0]
 
-    # Fetch all matching resumes to ensure global ranking (due to custom sorting logic in Python)
-    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).to_list(length=10000)
+    # Fetch matching resumes with database-level sorting for experience
+    # 1 is for Ascending (4, 5, 6...)
+    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).sort("extracted_data.experience", 1).to_list(length=10000)
     
     scored_results = []
     search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
@@ -309,7 +332,7 @@ async def search_resumes(
 
     # Sort results if searching (to maintain ranking)
     if job_title or skills or location:
-        final_list = rank_job_results(scored_results, job_title)
+        final_list = rank_job_results(scored_results, job_title, skill_query=skills)
     else:
         final_list = scored_results
 
