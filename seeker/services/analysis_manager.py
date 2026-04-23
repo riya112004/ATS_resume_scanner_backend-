@@ -10,14 +10,23 @@ from seeker.models.analysis_schema import AnalysisResult, ScoreBreakdown
 from dateutil import parser as date_parser
 from datetime import datetime
 
-# Healthcare-Focused Role Families
+# Hybrid Role Families (Healthcare + Tech)
 ROLE_FAMILIES = {
+    # --- Healthcare ---
     "CNA Family": ["cna", "certified nursing assistant", "nursing assistant", "nursing aide", "patient care assistant", "pca"],
     "Nurse Family": ["nurse", "registered nurse", "rn", "licensed practical nurse", "lpn", "lvn", "charge nurse"],
     "Medical Assistant Family": ["medical assistant", "ma", "clinical assistant", "medical office assistant"],
     "Patient Care Technician Family": ["pct", "patient care technician", "patient care tech", "clinical technician"],
     "Support & Caregiver Family": ["caregiver", "house attendant", "ward attendant", "patient care support", "home health aide", "hha", "personal care aide"],
-    "Lab & Clinical Family": ["phlebotomist", "lab technician", "laboratory assistant", "clinical lab assistant"],
+    
+    # --- Tech ---
+    "Full Stack Family": ["full stack developer", "fullstack developer", "mern developer", "mean developer", "software engineer", "sde"],
+    "Frontend Family": ["frontend developer", "front end developer", "ui developer", "react developer", "web developer"],
+    "Backend Family": ["backend developer", "back end developer", "node developer", "java developer", "python developer", "api developer"],
+    "Data Family": ["data scientist", "data analyst", "machine learning engineer", "ai engineer", "data engineer"],
+    
+    # --- Hospital Admin ---
+    " Lab & Clinical Family": ["phlebotomist", "lab technician", "laboratory assistant", "clinical lab assistant"],
     "Admin & Reception Family": ["medical receptionist", "front desk coordinator", "patient coordinator", "medical secretary"]
 }
 

@@ -5,12 +5,11 @@ from seeker.services.normalization import normalizer
 
 class LocalJDParser:
     """
-    100% FREE Local JD Parser. 
-    Uses Regex and Healthcare Mappings instead of OpenAI.
+    Hybrid Local JD Parser. 
+    Handles both Healthcare and Tech skills using local logic.
     """
     
     def extract_experience(self, text: str) -> float:
-        # Regex to find patterns like "3+ years", "5 years", "2-4 years"
         patterns = [
             r'(\d+)\+?\s*(?:year|yr)s?',
             r'(\d+)\s*(?:to|-)\s*(\d+)\s*(?:year|yr)s?'
@@ -22,30 +21,34 @@ class LocalJDParser:
         return 0.0
 
     def extract_skills(self, text: str) -> List[str]:
-        # Scan JD text against our healthcare skill dictionary
         found_skills = []
-        text_lower = text.lower()
+        text_lower = f" {text.lower()} "
         
-        # Use existing healthcare mappings from normalizer
+        # Check against ALL mappings (Tech + Healthcare)
         for skill_key in normalizer.SKILL_MAPPINGS.keys():
-            if f" {skill_key} " in f" {text_lower} " or text_lower.startswith(skill_key):
+            # Match word with boundaries to avoid sub-word matching
+            if re.search(rf'\b{re.escape(skill_key)}\b', text_lower):
                 found_skills.append(normalizer.SKILL_MAPPINGS[skill_key])
         
+        # Add some direct tech keywords that might not have synonyms
+        tech_keywords = ["html", "css", "java", "python", "c++", "c#", "php", "angular", "vue", "docker", "kubernetes"]
+        for tech in tech_keywords:
+            if re.search(rf'\b{re.escape(tech)}\b', text_lower):
+                found_skills.append(tech)
+                
         return list(set(found_skills))
 
     async def parse(self, title: str, description: str) -> ParsedJD:
-        # Extract basic info locally
         skills = self.extract_skills(description)
         exp = self.extract_experience(description)
         
-        # Build ParsedJD object
         return ParsedJD(
             role=title,
-            must_have_skills=skills[:8], # Top 8 skills
-            preferred_skills=skills[8:12],
+            must_have_skills=skills[:10],
+            preferred_skills=skills[10:15],
             min_experience=exp,
-            education_requirements=["Associate" if "associate" in description.lower() else "Bachelors"],
-            domain_keywords=["Healthcare"],
+            education_requirements=["Computer Science" if "computer" in description.lower() else "Any"],
+            domain_keywords=["Tech" if any(s in description.lower() for s in ["react", "node", "java"]) else "Healthcare"],
             raw_text=description
         )
 
