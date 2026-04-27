@@ -5,7 +5,7 @@ import time
 import re
 from datetime import datetime
 from typing import Optional
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Query
 from recruiter.core.config import settings
 from recruiter.utils.extractor import extract_text_from_file
 from recruiter.core.database import db
@@ -53,7 +53,8 @@ async def analyze_seeker_resume(
     job_description: str = Form(...),
     job_title: Optional[str] = Form("Job Role"),
     candidate_experience: Optional[float] = Form(None), 
-    resume_file: UploadFile = File(...)
+    resume_file: UploadFile = File(...),
+    ats: bool = Query(False)
 ):
     request_id = str(uuid.uuid4())
     start_time = time.time()
@@ -130,7 +131,7 @@ async def analyze_seeker_resume(
                 detail=f"Analysis failed: {str(ve)}. Please ensure the resume file is readable and follows a standard format."
             )
 
-        # 6. Database Storage
+        # 6. Database Storage (REMOVED AS REQUESTED)
         parsed_resume = analysis_data.get("parsed_resume", {})
         contact_info = parsed_resume.get("contact", {})
         
@@ -139,26 +140,22 @@ async def analyze_seeker_resume(
         overall_score = analysis_data.get("overall_ats_score", 0)
         relative_url = f"/uploads/{file_name}"
 
-        analysis_record = {
-            "analysis_id": request_id,
-            "candidate_name": name,
-            "candidate_email": email,
-            "job_title": job_title,
-            "resume_filename": resume_file.filename,
-            "resume_url": relative_url, # SAVED AS RELATIVE PATH
-            "job_description": job_description,
-            "jd_embedding": jd_embedding, # ADDED LOCAL EMBEDDING
-            "ats_score": overall_score,
-            "status": "completed",
-            "created_at": datetime.utcnow()
-        }
-        await db.db["seeker_analysis_history"].insert_one(analysis_record)
-        logger.info(f"[{request_id}] STEP 6 - Record saved to MongoDB for {name}")
+        # Skipping database storage...
+        logger.info(f"[{request_id}] STEP 6 - Record storage skipped (disabled).")
 
         duration = time.time() - start_time
         logger.info(f"[{request_id}] SUCCESS - Analysis finished in {duration:.2f}s")
 
-        # 7. Simplified Response (Include ATS score, exclude breakdown)
+        # 7. Simplified Response Based on 'ats' parameter
+        if ats:
+            return {
+                "success": True,
+                "data": {
+                    "candidate_email": email,
+                    "overall_ats_score": overall_score
+                }
+            }
+
         return {
             "success": True,
             "message": "Resume analyzed and candidate details saved successfully.",
