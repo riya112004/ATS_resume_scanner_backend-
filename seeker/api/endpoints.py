@@ -83,11 +83,8 @@ async def analyze_seeker_resume(
         logger.warning(f"[{request_id}] VALIDATION FAILED - Invalid MIME type: {resume_file.content_type}")
         raise HTTPException(status_code=415, detail="Invalid file type. Only PDF and DOCX are allowed.")
 
-    file_name = f"seeker_{request_id}{ext}"
-    file_path = os.path.join(settings.UPLOAD_DIR, file_name)
-    
     try:
-        # 3. Save File
+        # 3. READ FILE INTO MEMORY (NO LOCAL SAVING)
         content = await resume_file.read()
         logger.info(f"[{request_id}] STEP 1 - File read. Size: {len(content)} bytes")
         
@@ -98,13 +95,10 @@ async def analyze_seeker_resume(
                 status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, 
                 detail=f"File too large. Maximum size allowed is {MAX_FILE_SIZE // (1024 * 1024)}MB."
             )
-
-        with open(file_path, "wb") as buffer:
-            buffer.write(content)
         
         # 4. Text Extraction
         logger.info(f"[{request_id}] STEP 2 - Extracting text...")
-        raw_text = await extract_text_from_file(file_path)
+        raw_text = await extract_text_from_file(file_content=content, filename=resume_file.filename)
         if not raw_text or len(raw_text.strip()) < 50:
              logger.error(f"[{request_id}] EXTRACTION FAILED - Text too short or empty.")
              raise ValueError("Could not extract text.")
@@ -138,7 +132,6 @@ async def analyze_seeker_resume(
         name = contact_info.get("name", "Unknown")
         email = contact_info.get("email", "Not Found")
         overall_score = analysis_data.get("overall_ats_score", 0)
-        relative_url = f"/uploads/{file_name}"
 
         # Skipping database storage...
         logger.info(f"[{request_id}] STEP 6 - Record storage skipped (disabled).")
@@ -158,7 +151,7 @@ async def analyze_seeker_resume(
 
         return {
             "success": True,
-            "message": "Resume analyzed and candidate details saved successfully.",
+            "message": "Resume analyzed successfully.",
             "data": {
                 "candidate_name": name,
                 "candidate_email": email,
@@ -168,7 +161,7 @@ async def analyze_seeker_resume(
                 "missing_critical_skills": analysis_data.get("missing_critical_skills", []),
                 "warnings": analysis_data.get("warnings", []),
                 "verdict": analysis_data.get("verdict", ""),
-                "resume_url": f"{settings.BASE_URL}{relative_url}" # RETURNED AS FULL URL FOR FRONTEND
+                "resume_url": None # File not stored
             }
         }
 

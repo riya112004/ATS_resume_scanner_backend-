@@ -13,6 +13,7 @@ from recruiter.utils.extractor import extract_text_from_file
 from recruiter.services.parser import parser
 from recruiter.services.embeddings import embedding_service
 from recruiter.services.matching import calculate_match_score
+from recruiter.services.scoring_engine import recruiter_scoring
 
 # Configure Logging
 log_file = os.path.join(os.getcwd(), "activity.log")
@@ -27,22 +28,6 @@ logging.basicConfig(
 logger = logging.getLogger("recruiter_api")
 
 router = APIRouter()
-
-# --- JOB TITLE SYNONYMS ---
-JOB_SYNONYMS = {
-    "dev": ["developer", "engineer", "software"],
-    "developer": ["dev", "engineer", "software"],
-    "engineer": ["dev", "developer", "software"],
-    "frontend": ["front-end", "ui", "ux", "client side"],
-    "backend": ["back-end", "server side", "api", "distributed"],
-    "fullstack": ["full stack", "full-stack", "mern", "mean"],
-    "data": ["analyst", "scientist", "ai", "ml"],
-    "hr": ["human resources", "recruiter", "talent"],
-    "qa": ["quality assurance", "tester", "testing", "sdet"],
-    "cna": ["nursing assistant", "certified nursing assistant", "patient care", "nurse"],
-    "nursing": ["cna", "nurse", "assistant", "medical"],
-    "assistant": ["helper", "support", "aide", "assistant"]
-}
 
 # --- HELPERS ---
 
@@ -63,16 +48,6 @@ def is_valid_location_query(query: str) -> bool:
         return False
     return True
 
-def tokenize_and_expand_job(query: str) -> List[List[str]]:
-    words = re.findall(r'\w+', query.lower())
-    token_groups = []
-    for word in words:
-        group = [word]
-        if word in JOB_SYNONYMS:
-            group.extend(JOB_SYNONYMS[word])
-        token_groups.append(list(set(group)))
-    return token_groups
-
 def rank_job_results(results: List[Dict], original_query: str, skill_query: Optional[str] = None) -> List[Dict]:
     # 1. Clean Skill Query
     target_skills = []
@@ -88,7 +63,7 @@ def rank_job_results(results: List[Dict], original_query: str, skill_query: Opti
                 matched_count += 1
         res["skill_match_count"] = matched_count
 
-        # 3. Job Title Score
+        # 3. Job Title Score (Universal Semantic Matching)
         title_score = 0
         if original_query:
             q_lower = original_query.lower().strip()
@@ -102,14 +77,15 @@ def rank_job_results(results: List[Dict], original_query: str, skill_query: Opti
         res["job_rank_score"] = title_score
         
     # 4. Final MULTI-LEVEL Sort:
-    # Priority 1: Most Skills Matched (Descending: 4, 3, 2, 1...)
-    # Priority 2: Job Title Match (Highest first)
-    # Priority 3: Experience (Ascending: 0, 1, 2... - AS REQUESTED)
+    # Priority 1: Semantic Match Score (Highest first)
+    # Priority 2: Most Skills Matched (Descending)
+    # Priority 3: Job Title Match (Highest first)
+    # Priority 4: Experience (Descending)
     results.sort(key=lambda x: (
+        -x.get("match_score", 0),
         -x.get("skill_match_count", 0),
         -x.get("job_rank_score", 0), 
-        x.get("extracted_data", {}).get("experience", 0),
-        -x.get("match_score", 0)
+        -x.get("extracted_data", {}).get("experience", 0)
     ))
     return results
 
@@ -118,6 +94,9 @@ from recruiter.utils.hashing import generate_identity_hash
 # --- SEMAPHORE (Limit concurrency) ---
 MAX_CONCURRENT_TASKS = 5
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+
+from fastapi.responses import StreamingResponse
+import io
 
 @router.post("/upload")
 async def upload_resumes(
@@ -136,27 +115,20 @@ async def upload_resumes(
         async with semaphore:
             start_time = time.time()
             try:
-                # 1. SAVE FILE TEMPORARILY
-                file_id = str(uuid.uuid4())
-                _, ext = os.path.splitext(file.filename)
-                file_name = f"{file_id}{ext}"
-                file_path = os.path.join(settings.UPLOAD_DIR, file_name)
-                
-                content = await file.read()
-                with open(file_path, "wb") as buffer:
-                    buffer.write(content)
+                # 1. READ FILE CONTENT
+                file_content = await file.read()
                 
                 # 2. EXTRACTION & AI PARSING
-                logger.info(f"[{file_id}] STEP 2 - Extracting text and AI parsing...")
-                raw_text = await extract_text_from_file(file_path)
+                logger.info(f"STEP 2 - Extracting text and AI parsing for {file.filename}...")
+                raw_text = await extract_text_from_file(file_content=file_content, filename=file.filename)
                 parsed_data = await parser.parse_resume_text(raw_text)
-                logger.info(f"[{file_id}] STEP 2 DONE - AI parsed for {parsed_data.name}")
+                logger.info(f"STEP 2 DONE - AI parsed for {parsed_data.name}")
                 
                 # 3. GENERATE IDENTITY HASH
                 identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
                 
                 # 4. ULTRA-STRICT DUPLICATE CHECK
-                logger.info(f"[{file_id}] STEP 4 - Checking duplicates in MongoDB...")
+                logger.info(f"STEP 4 - Checking duplicates in MongoDB...")
                 duplicate_query = {
                     "$or": [
                         {"identity_hash": identity_hash},
@@ -166,41 +138,49 @@ async def upload_resumes(
                 
                 existing = await db.db["recruiter's resume"].find_one(duplicate_query)
                 if existing:
-                    logger.info(f"[{file_id}] DUPLICATE - Found for {parsed_data.name}")
-                    if os.path.exists(file_path): os.remove(file_path)
+                    logger.info(f"DUPLICATE - Found for {parsed_data.name}")
                     return {
                         "filename": file.filename,
                         "status": "duplicate_resume",
                         "message": f"Candidate {parsed_data.name} already exists.",
                         "identity_hash": identity_hash,
-                        "resumeURL": f"{settings.BASE_URL}{existing.get('resumeURL')}"
+                        "resumeURL": existing.get("resumeURL")
                     }
 
-                # 5. AI TASKS (Parallel)
-                logger.info(f"[{file_id}] STEP 5 - Generating local embeddings and matching...")
+                # 5. SAVE FILE LOCALLY
+                file_uuid = str(uuid.uuid4())
+                extension = os.path.splitext(file.filename)[1]
+                new_filename = f"{file_uuid}{extension}"
+                file_path = os.path.join(settings.UPLOAD_DIR, new_filename)
+                
+                with open(file_path, "wb") as f:
+                    f.write(file_content)
+                
+                relative_url = f"/uploads/{new_filename}"
+
+                # 6. AI TASKS (Parallel)
+                logger.info(f"STEP 6 - Generating embeddings and matching...")
                 parsed_text = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)}"
                 
-                # We do this step-by-step for debugging
                 embedding = await embedding_service.generate_embedding(parsed_text.strip())
-                logger.info(f"[{file_id}] Embedding generated.")
                 
                 match_score = 0.0
                 if job_description:
                     match_score = await calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding)
-                    logger.info(f"[{file_id}] Match score calculated: {match_score}")
 
-                # 6. SAVE TO MONGODB
-                logger.info(f"[{file_id}] STEP 6 - Saving to MongoDB...")
-                relative_url = f"/uploads/{file_name}"
+                # 7. SAVE TO MONGODB
+                logger.info(f"STEP 7 - Saving to MongoDB...")
+                
                 await db.db["recruiter's resume"].insert_one({
                     "identity_hash": identity_hash,
                     "filename": file.filename,
                     "resumeURL": relative_url,
                     "extracted_data": parsed_data.dict(),
                     "embedding": embedding,
+                    "raw_content": raw_text,
                     "updated_at": uuid.uuid4().hex
                 })
-                logger.info(f"[{file_id}] STEP 6 DONE - Saved successfully.")
+                logger.info(f"STEP 7 DONE - Saved successfully.")
                 
                 return {
                     "filename": file.filename,
@@ -211,7 +191,6 @@ async def upload_resumes(
                 }
             except Exception as e:
                 logger.error(f"Error {file.filename}: {str(e)}")
-                if os.path.exists(file_path): os.remove(file_path)
                 return {"filename": file.filename, "error": str(e)}
 
     tasks = [process_single_file(file) for file in files]
@@ -283,10 +262,11 @@ async def search_resumes(
             combined_filters.append({"$or": loc_conditions})
 
     if job_title:
-        token_groups = tokenize_and_expand_job(job_title)
-        if token_groups:
-            # Change to $or to get more results
-            job_conditions = [{"extracted_data.job_title": {"$regex": "|".join([re.escape(t) for t in g]), "$options": "i"}} for g in token_groups]
+        # Universal search: Look for the job title tokens directly in the stored title
+        title_tokens = re.findall(r'\w+', job_title.lower())
+        if title_tokens:
+            # Match if ANY word from the search query exists in the job title
+            job_conditions = [{"extracted_data.job_title": {"$regex": re.escape(t), "$options": "i"}} for t in title_tokens]
             combined_filters.append({"$or": job_conditions})
 
     if combined_filters:
@@ -296,8 +276,8 @@ async def search_resumes(
             mongo_filter = combined_filters[0]
 
     # Fetch matching resumes with database-level sorting for experience
-    # 1 is for Ascending (4, 5, 6...)
-    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).sort("extracted_data.experience", 1).to_list(length=10000)
+    # -1 is for Descending (10, 9, 8...)
+    all_resumes = await db.db["recruiter's resume"].find(mongo_filter).sort("extracted_data.experience", -1).to_list(length=10000)
     
     scored_results = []
     search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
@@ -310,29 +290,50 @@ async def search_resumes(
         # 1. AI Vector Score
         vector_score = 0.0
         if query_embedding and "embedding" in res:
-            a, b = np.array(query_embedding), np.array(res["embedding"])
-            vector_score = float(round((np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))) * 100, 2))
+            vector_score = await recruiter_scoring.calculate_vector_score(query_embedding, res["embedding"])
         
         # 2. Location Match Score (Multiplier)
-        loc_boost = 1.0
-        if search_loc_parts:
-            res_data = res.get("extracted_data", {})
-            # If any part matches city, state, or country, give full boost
-            res_loc_values = [
-                res_data.get("city", "").lower(), 
-                res_data.get("state", "").lower(), 
-                res_data.get("country", "").lower()
-            ]
-            if any(p.lower() in res_loc_values for p in search_loc_parts):
-                loc_boost = 1.2 # Give 20% boost for location relevance
+        res["match_score"] = recruiter_scoring.apply_location_boost(vector_score, search_loc_parts, res.get("extracted_data", {}))
         
-        res["match_score"] = vector_score * loc_boost
+        # 3. Keyword Frequency Boost (Smart Filtering)
+        raw_content = res.get("raw_content", "")
+        res["keyword_occurrence_count"] = 0
+        
+        if raw_content and job_title:
+            raw_lower = raw_content.lower()
+            # 1. User ke search query ko tokens mein split karein
+            query_tokens = [t.strip().lower() for t in re.split(r'[,\s/]+', job_title) if len(t.strip()) > 1]
+            
+            # 2. Noise words (Developer, Engineer, etc.) ki list
+            noise_words = {"developer", "engineer", "manager", "lead", "senior", "junior", "staff", "associate", "role", "position", "analyst", "specialist"}
+            
+            # 3. Sirf core keywords rakhein (jo noise list mein nahi hain)
+            # Example: "React Developer" -> ["react"]
+            core_keywords = [t for t in query_tokens if t not in noise_words]
+            
+            # Agar sab delete ho jaye (e.g. user ne sirf "Developer" search kiya), toh original hi use karein
+            search_terms = core_keywords if core_keywords else query_tokens
+
+            total_occ = 0
+            for kw in set(search_terms):
+                matches = re.findall(r'\b' + re.escape(kw) + r'\b', raw_lower)
+                total_occ += len(matches)
+            
+            res["keyword_occurrence_count"] = total_occ
+            
+            # Boost logic: Reduced from 2.0 to 0.5 per hit as requested
+            freq_boost = float(total_occ * 0.5)
+            res["match_score"] += freq_boost
+            logger.info(f"Applied Smart Job Title boost of {freq_boost} ({total_occ} hits) to {res.get('filename')}")
+        
         res.pop("embedding", None)
+        res.pop("raw_content", None)
+        res.pop("updated_at", None)
         scored_results.append(res)
 
     # Sort results if searching (to maintain ranking)
     if job_title or skills or location:
-        final_list = rank_job_results(scored_results, job_title, skill_query=skills)
+        final_list = recruiter_scoring.rank_results(scored_results, job_title, skill_query=skills)
     else:
         final_list = scored_results
 
@@ -346,6 +347,11 @@ async def search_resumes(
     
     paginated_results = final_list[start_idx : end_idx]
 
+    # Remove internal sorting fields before response
+    for item in paginated_results:
+        item.pop("job_rank_score", None)
+        # item.pop("skill_match_count", None)  # Restored as requested
+
     return {
         "metadata": {
             "total_records": total_count,
@@ -357,4 +363,3 @@ async def search_resumes(
         },
         "results": paginated_results
     }
-

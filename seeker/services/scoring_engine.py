@@ -2,79 +2,49 @@ from seeker.models.analysis_schema import ScoreBreakdown
 from typing import List, Dict
 
 class ScoringEngine:
-    # --- Weight Profiles based on Role Context ---
-    PROFILES = {
-        "STANDARD": {
-            "skills": 0.30, "experience": 0.25, "role": 0.10, "projects": 0.15, 
-            "education": 0.05, "keywords": 0.10, "formatting": 0.05
-        },
-        "HEALTHCARE_OPS": {
-            "skills": 0.40, "experience": 0.35, "role": 0.10, "projects": 0.0, # Projects removed
-            "education": 0.05, "keywords": 0.05, "formatting": 0.05
-        },
-        "TECH_SENIOR": {
-            "skills": 0.25, "experience": 0.30, "role": 0.10, "projects": 0.25, # High project weight
-            "education": 0.02, "keywords": 0.05, "formatting": 0.03
-        },
-        "ENTRY_LEVEL": {
-            "skills": 0.40, "experience": 0.10, "role": 0.05, "projects": 0.20, 
-            "education": 0.10, "keywords": 0.10, "formatting": 0.05
-        }
+    # --- Universal Weight Profile (Fair for all industries) ---
+    UNIVERSAL_WEIGHTS = {
+        "skills": 0.35,        # Technical & Soft skills
+        "experience": 0.30,    # Relevant work history
+        "role": 0.10,          # Job title alignment
+        "projects": 0.10,      # Portfolio & projects
+        "education": 0.05,     # Degrees & Certifications
+        "keywords": 0.05,      # Domain-specific terms
+        "formatting": 0.05     # ATS readability
     }
 
     # --- Penalty Config ---
     CRITICAL_SKILL_PENALTY = 2.0
 
-    def _detect_profile(self, job_title: str, min_exp: float) -> str:
-        title = job_title.lower()
-        
-        # 1. Healthcare / Support / Ops
-        healthcare_keywords = ["nurse", "cna", "care", "medical", "attendant", "support", "ops", "operation"]
-        if any(k in title for k in healthcare_keywords):
-            return "HEALTHCARE_OPS"
-        
-        # 2. Senior Tech Roles
-        senior_keywords = ["senior", "lead", "architect", "manager", "principal", "sr."]
-        if any(k in title for k in senior_keywords) and min_exp >= 5:
-            return "TECH_SENIOR"
-        
-        # 3. Entry Level
-        entry_keywords = ["junior", "intern", "trainee", "entry", "fresher", "jr."]
-        if any(k in title for k in entry_keywords) or min_exp <= 1:
-            return "ENTRY_LEVEL"
-        
-        return "STANDARD"
-
     def calculate_overall(self, breakdown: ScoreBreakdown, missing_critical_count: int, job_title: str, min_exp: float) -> float:
         """
-        Calculates weighted sum using a context-aware profile.
-        Dynamic Handling: If projects are None, their weight is set to 0.
+        Calculates weighted sum using a Universal profile for all jobs.
         """
-        profile_name = self._detect_profile(job_title, min_exp)
-        w = self.PROFILES[profile_name].copy()
+        w = self.UNIVERSAL_WEIGHTS.copy()
         
         # --- DYNAMIC PROJECT LOGIC ---
         project_relevance = 0.0
         project_bonus = 0.0
 
         if breakdown.project_relevance is None:
-            # Case 1: No projects in resume
+            # If no projects section exists, distribute its weight to Skills and Experience
+            w["skills"] += 0.05
+            w["experience"] += 0.05
             w["projects"] = 0.0
             project_relevance = 0.0
         else:
-            # Case 2: Projects exist
             project_relevance = breakdown.project_relevance
-            project_bonus = 3.0 # Small incentive boost for having projects
+            project_bonus = 2.0 # Standard incentive for having projects
         
         # Calculate Weighted Score
         base_score = (
-            (breakdown.skills_match * w.get("skills", 0)) +
-            (breakdown.experience_relevance * w.get("experience", 0)) +
-            (breakdown.role_alignment * w.get("role", 0)) +
-            (project_relevance * w.get("projects", 0)) +
-            (breakdown.education_certifications * w.get("education", 0)) +
-            (breakdown.keyword_coverage * w.get("keywords", 0)) +
-            (breakdown.formatting_readability * w.get("formatting", 0))
+            (breakdown.skills_match * w["skills"]) +
+            (breakdown.experience_relevance * w["experience"]) +
+            (breakdown.role_alignment * w["role"]) +
+            (project_relevance * w["projects"]) +
+            (breakdown.education_certifications * w["education"]) +
+            (breakdown.keyword_coverage * w["keywords"]) +
+            (breakdown.formatting_readability * w["formatting"])
         )
         
         # Apply Explicit Penalty for missing Must-Have skills

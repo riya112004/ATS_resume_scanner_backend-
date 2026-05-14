@@ -11,30 +11,23 @@ class SeekerResumeParser:
 
     async def parse(self, text: str) -> ParsedResume:
         today_str = datetime.now().strftime("%B %Y")
-        
+
         # Increase limit slightly but remain context-efficient
         # Most resumes fit in 8000-10000 chars unless extremely verbose
         resume_content = text[:8000]
 
         prompt = f"""
-        You are an expert ATS (Applicant Tracking System) parser specialized in HEALTHCARE. TODAY'S DATE IS {today_str}.
+        You are an expert ATS (Applicant Tracking System) parser. TODAY'S DATE IS {today_str}.
         Extract all structured data from the resume text provided.
-        
-        IMPORTANT - IMPLIED SKILLS EXTRACTION:
-        Also extract IMPLIED SKILLS from work experience descriptions.
-        Examples:
-        - "Took vital signs, blood pressure" → include "monitoring vital signs" in skills.
-        - "Assisted patients with bathing, dressing, grooming" → include "activities of daily living" in skills.
-        - "Transferred patients using Hoyer lift" → include "patient transfer equipment" in skills.
-        - "Maintained patient charts" → include "patient documentation" in skills.
-        - "Followed strict PPE and sanitization protocols" → include "safety & hygiene" in skills.
+
+        Ensure you extract a comprehensive list of technical, soft, and domain-specific skills found in the text.
 
         Return ONLY a JSON object with these keys:
         - name
         - email
         - phone
         - links (list of URLs)
-        - skills (comprehensive list of technical, clinical, and IMPLIED skills)
+        - skills (comprehensive list of skills)
         - work_history (list of objects: company, role, start_date, end_date, description)
         - education (list of objects: degree, field, institution)
         - projects (list of project titles and descriptions)

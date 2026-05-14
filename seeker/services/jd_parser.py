@@ -24,18 +24,14 @@ class LocalJDParser:
         found_skills = []
         text_lower = f" {text.lower()} "
         
-        # Check against ALL mappings (Tech + Healthcare)
-        for skill_key in normalizer.SKILL_MAPPINGS.keys():
-            # Match word with boundaries to avoid sub-word matching
+        # Check against common standardized mappings
+        for skill_key in normalizer.COMMON_MAPPINGS.keys():
             if re.search(rf'\b{re.escape(skill_key)}\b', text_lower):
-                found_skills.append(normalizer.SKILL_MAPPINGS[skill_key])
+                found_skills.append(normalizer.COMMON_MAPPINGS[skill_key])
         
-        # Add some direct tech keywords that might not have synonyms
-        tech_keywords = ["html", "css", "java", "python", "c++", "c#", "php", "angular", "vue", "docker", "kubernetes"]
-        for tech in tech_keywords:
-            if re.search(rf'\b{re.escape(tech)}\b', text_lower):
-                found_skills.append(tech)
-                
+        # In general mode, we rely more on the AI parser for JD skills, 
+        # but for local parsing, we'll extract capitalized terms as potential skills
+        # if they aren't common words.
         return list(set(found_skills))
 
     async def parse(self, title: str, description: str) -> ParsedJD:
@@ -47,8 +43,8 @@ class LocalJDParser:
             must_have_skills=skills[:10],
             preferred_skills=skills[10:15],
             min_experience=exp,
-            education_requirements=["Computer Science" if "computer" in description.lower() else "Any"],
-            domain_keywords=["Tech" if any(s in description.lower() for s in ["react", "node", "java"]) else "Healthcare"],
+            education_requirements=["As specified in JD"],
+            domain_keywords=["General"],
             raw_text=description
         )
 
