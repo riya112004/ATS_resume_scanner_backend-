@@ -12,7 +12,9 @@ class Settings:
     
     # LLM and Vector Search settings
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # EMBEDDING_MODEL: str = "nomic-embed-text-v1.5"
+    EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
     
     # Model Configurations
     AI_MODEL: str = "gpt-4o-mini"

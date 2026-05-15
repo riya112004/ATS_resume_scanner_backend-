@@ -14,6 +14,7 @@ from recruiter.services.parser import parser
 from recruiter.services.embeddings import embedding_service
 from recruiter.services.matching import calculate_match_score
 from recruiter.services.scoring_engine import recruiter_scoring
+from recruiter.services.boolean_search import boolean_engine
 
 # Configure Logging
 log_file = os.path.join(os.getcwd(), "activity.log")
@@ -201,12 +202,13 @@ from math import ceil
 
 @router.get("/search")
 async def search_resumes(
+    query: Optional[str] = Query(None), # Dedicated Boolean Explorer Parameter
     min_experience: Optional[float] = None,
     max_experience: Optional[float] = None,
     location: Optional[str] = None,
     skills: Optional[str] = None,
-    education: Optional[str] = None,
     job_title: Optional[str] = None,
+    is_boolean: bool = Query(False),
     match_all: bool = Query(False),
     current_page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100)
@@ -214,125 +216,152 @@ async def search_resumes(
     mongo_filter = {}
     combined_filters = []
     
-    if min_experience is not None or max_experience is not None:
-        exp_filter = {}
-        if min_experience is not None: exp_filter["$gte"] = min_experience
-        if max_experience is not None: exp_filter["$lte"] = max_experience
-        combined_filters.append({"extracted_data.experience": exp_filter})
-
-    if skills:
-        # Split skills by comma first
-        skill_queries = [s.strip().lower() for s in skills.split(",") if s.strip()]
-        all_conditions = []
+    # --- 1. Boolean Search Logic (Dedicated Query Parameter) ---
+    if is_boolean:
+        # Use ONLY the 'query' parameter for the Boolean logic
+        if query:
+            # Initial 'Wide Net' fetch: Find resumes containing ANY of the literal keywords
+            keywords = boolean_engine.extract_keywords(query)
+            if keywords:
+                or_conditions = []
+                for kw in keywords:
+                    if kw.endswith("*"):
+                        root = kw[:-1]
+                        # Match any word starting with the root
+                        or_conditions.append({"raw_content": {"$regex": rf"\b{re.escape(root)}\w*", "$options": "i"}})
+                    else:
+                        or_conditions.append({"raw_content": {"$regex": re.escape(kw), "$options": "i"}})
+                mongo_filter = {"$or": or_conditions}
+            logger.info(f"Boolean Mode activated. Query: {query}")
         
-        for s_query in skill_queries:
-            # For each skill query, split by space to handle multi-word skills like "health care"
-            sub_parts = s_query.split()
-            if not sub_parts: continue
-            
-            # Create a regex that matches ANY of the words in the multi-word skill
-            # e.g. "health care" -> matches anything with "health" OR "care"
-            sub_conditions = [{"extracted_data.skills": {"$regex": get_strict_skill_regex(part), "$options": "i"}} for part in sub_parts]
-            
-            if len(sub_conditions) > 1:
-                all_conditions.append({"$or": sub_conditions})
-            else:
-                all_conditions.append(sub_conditions[0])
-
-        if all_conditions:
-            combined_filters.append({"$and" if match_all else "$or": all_conditions})
-
-    # --- Dynamic AI-Driven Location Search ---
-    search_loc_parts = []
-    if location and is_valid_location_query(location):
-        # AI will have stored these fields. We match the query against any of them.
-        search_loc_parts = [p.strip() for p in location.split(",")]
+        # Apply strict experience/location filters if provided along with boolean query
+        extra_filters = []
+        if min_experience is not None or max_experience is not None:
+            exp_filter = {}
+            if min_experience is not None: exp_filter["$gte"] = min_experience
+            if max_experience is not None: exp_filter["$lte"] = max_experience
+            extra_filters.append({"extracted_data.experience": exp_filter})
         
-        loc_conditions = []
-        for part in search_loc_parts:
-            p_esc = re.escape(part)
-            # Relaxed: Removed ^ and $ to allow partial matching (e.g., "New York" matches "New York City")
-            loc_conditions.extend([
-                {"extracted_data.city": {"$regex": p_esc, "$options": "i"}},
-                {"extracted_data.state": {"$regex": p_esc, "$options": "i"}},
-                {"extracted_data.country": {"$regex": p_esc, "$options": "i"}}
-            ])
+        if location and is_valid_location_query(location):
+            search_loc_parts = [p.strip() for p in location.split(",")]
+            loc_conditions = []
+            for part in search_loc_parts:
+                p_esc = re.escape(part)
+                loc_conditions.extend([
+                    {"extracted_data.city": {"$regex": p_esc, "$options": "i"}},
+                    {"extracted_data.state": {"$regex": p_esc, "$options": "i"}},
+                    {"extracted_data.country": {"$regex": p_esc, "$options": "i"}}
+                ])
+            if loc_conditions: extra_filters.append({"$or": loc_conditions})
         
-        if loc_conditions:
-            combined_filters.append({"$or": loc_conditions})
+        if extra_filters:
+            if mongo_filter: mongo_filter = {"$and": [mongo_filter] + extra_filters}
+            else: mongo_filter = {"$and": extra_filters} if len(extra_filters) > 1 else extra_filters[0]
 
-    if job_title:
-        # Universal search: Look for the job title tokens directly in the stored title
-        title_tokens = re.findall(r'\w+', job_title.lower())
-        if title_tokens:
-            # Match if ANY word from the search query exists in the job title
-            job_conditions = [{"extracted_data.job_title": {"$regex": re.escape(t), "$options": "i"}} for t in title_tokens]
-            combined_filters.append({"$or": job_conditions})
+    # --- 2. Standard Search Logic (is_boolean=False) ---
+    else:
+        if min_experience is not None or max_experience is not None:
+            exp_filter = {}
+            if min_experience is not None: exp_filter["$gte"] = min_experience
+            if max_experience is not None: exp_filter["$lte"] = max_experience
+            combined_filters.append({"extracted_data.experience": exp_filter})
 
-    if combined_filters:
-        if len(combined_filters) > 1:
-            mongo_filter["$and"] = combined_filters
-        else:
-            mongo_filter = combined_filters[0]
+        if skills:
+            skill_queries = [s.strip().lower() for s in skills.split(",") if s.strip()]
+            all_conditions = []
+            for s_query in skill_queries:
+                sub_parts = s_query.split()
+                if not sub_parts: continue
+                sub_conditions = [{"extracted_data.skills": {"$regex": get_strict_skill_regex(part), "$options": "i"}} for part in sub_parts]
+                if len(sub_conditions) > 1: all_conditions.append({"$or": sub_conditions})
+                else: all_conditions.append(sub_conditions[0])
+            if all_conditions: combined_filters.append({"$and" if match_all else "$or": all_conditions})
 
-    # Fetch matching resumes with database-level sorting for experience
-    # -1 is for Descending (10, 9, 8...)
+        if location and is_valid_location_query(location):
+            search_loc_parts = [p.strip() for p in location.split(",")]
+            loc_conditions = []
+            for part in search_loc_parts:
+                p_esc = re.escape(part)
+                loc_conditions.extend([
+                    {"extracted_data.city": {"$regex": p_esc, "$options": "i"}},
+                    {"extracted_data.state": {"$regex": p_esc, "$options": "i"}},
+                    {"extracted_data.country": {"$regex": p_esc, "$options": "i"}}
+                ])
+            if loc_conditions: combined_filters.append({"$or": loc_conditions})
+
+        if job_title:
+            title_tokens = re.findall(r'\w+', job_title.lower())
+            if title_tokens:
+                job_conditions = [{"extracted_data.job_title": {"$regex": re.escape(t), "$options": "i"}} for t in title_tokens]
+                combined_filters.append({"$or": job_conditions})
+
+        if combined_filters:
+            mongo_filter = {"$and": combined_filters} if len(combined_filters) > 1 else combined_filters[0]
+
+    # --- 3. EXECUTION & ACCURACY PRUNING ---
     all_resumes = await db.db["recruiter's resume"].find(mongo_filter).sort("extracted_data.experience", -1).to_list(length=10000)
     
     scored_results = []
-    search_query = f"{job_title or ''} {skills or ''} {location or ''}".strip()
-    query_embedding = await embedding_service.generate_embedding(search_query) if (job_title or skills or location) else None
+    # Generation text depends on mode
+    search_emb_text = query if (is_boolean and query) else f"{job_title or ''} {skills or ''} {location or ''}".strip()
+    query_embedding = await embedding_service.generate_embedding(search_emb_text) if search_emb_text else None
+    search_loc_parts = [p.strip() for p in location.split(",")] if location else []
 
     for res in all_resumes:
+        raw_text = res.get("raw_content", "")
+        
+        # Mandatory Strict Validation for Boolean Mode
+        if is_boolean and query:
+            eval_result = boolean_engine.evaluate_query(query, raw_text)
+            if not eval_result.get("matched", False):
+                logger.info(f"PRUNED - {res.get('filename')} failed strict boolean evaluation.")
+                continue
+            
+            # Add Debug Fields for Boolean mode
+            res["boolean_matched"] = True
+            all_keywords = boolean_engine.extract_keywords(query)
+            res["matched_terms"] = [kw for kw in all_keywords if boolean_engine.phrase_exists(kw, boolean_engine.preprocess_text(raw_text))]
+            res["wildcard_terms"] = [kw for kw in all_keywords if kw.endswith("*")]
+            res["boolean_expression"] = eval_result.get("expression")
+
         res["_id"] = str(res["_id"])
         if res["resumeURL"].startswith("/uploads/"): res["resumeURL"] = f"{settings.BASE_URL}{res['resumeURL']}"
         
-        # 1. AI Vector Score
         vector_score = 0.0
         if query_embedding and "embedding" in res:
             vector_score = await recruiter_scoring.calculate_vector_score(query_embedding, res["embedding"])
         
-        # 2. Location Match Score (Multiplier)
         res["match_score"] = recruiter_scoring.apply_location_boost(vector_score, search_loc_parts, res.get("extracted_data", {}))
         
-        # 3. Keyword Frequency Boost (Smart Filtering)
-        raw_content = res.get("raw_content", "")
+        # Keyword Frequency Boost
         res["keyword_occurrence_count"] = 0
-        
-        if raw_content and job_title:
-            raw_lower = raw_content.lower()
-            # 1. User ke search query ko tokens mein split karein
-            query_tokens = [t.strip().lower() for t in re.split(r'[,\s/]+', job_title) if len(t.strip()) > 1]
-            
-            # 2. Noise words (Developer, Engineer, etc.) ki list
-            noise_words = {"developer", "engineer", "manager", "lead", "senior", "junior", "staff", "associate", "role", "position", "analyst", "specialist"}
-            
-            # 3. Sirf core keywords rakhein (jo noise list mein nahi hain)
-            # Example: "React Developer" -> ["react"]
-            core_keywords = [t for t in query_tokens if t not in noise_words]
-            
-            # Agar sab delete ho jaye (e.g. user ne sirf "Developer" search kiya), toh original hi use karein
-            search_terms = core_keywords if core_keywords else query_tokens
+        if raw_text and (query if is_boolean else job_title):
+            raw_lower = raw_text.lower()
+            if is_boolean:
+                search_terms = boolean_engine.extract_keywords(query)
+            else:
+                # Use ONLY job_title for frequency boost in Standard Mode
+                query_tokens = [t.strip().lower() for t in re.split(r'[,\s/]+', job_title) if len(t.strip()) > 1]
+                search_terms = [t for t in query_tokens if t.upper() not in {"DEVELOPER", "ENGINEER", "MANAGER"}]
 
             total_occ = 0
             for kw in set(search_terms):
-                matches = re.findall(r'\b' + re.escape(kw) + r'\b', raw_lower)
+                if not kw: continue
+                matches = re.findall(rf"\b{re.escape(kw)}\b" if ' ' not in kw else re.escape(kw), raw_lower)
                 total_occ += len(matches)
-            
             res["keyword_occurrence_count"] = total_occ
-            
-            # Boost logic: Reduced from 2.0 to 0.5 per hit as requested
-            freq_boost = float(total_occ * 0.5)
-            res["match_score"] += freq_boost
-            logger.info(f"Applied Smart Job Title boost of {freq_boost} ({total_occ} hits) to {res.get('filename')}")
+            res["match_score"] += float(total_occ * 0.5)
         
         res.pop("embedding", None)
         res.pop("raw_content", None)
         res.pop("updated_at", None)
         scored_results.append(res)
 
-    # Sort results if searching (to maintain ranking)
-    if job_title or skills or location:
+    # Sort results
+    if is_boolean and query:
+        # Use the sorting logic defined specifically in the Boolean search file
+        final_list = boolean_engine.sort_results(scored_results)
+    elif job_title or skills or location:
         final_list = recruiter_scoring.rank_results(scored_results, job_title, skill_query=skills)
     else:
         final_list = scored_results
@@ -340,16 +369,16 @@ async def search_resumes(
     # --- Page-based Pagination Logic ---
     total_count = len(final_list)
     total_pages = ceil(total_count / limit) if total_count > 0 else 1
-    
-    # Calculate slice indices
     start_idx = (current_page - 1) * limit
-    end_idx = start_idx + limit
-    
-    paginated_results = final_list[start_idx : end_idx]
+    paginated_results = final_list[start_idx : start_idx + limit]
 
-    # Remove internal sorting fields before response
     for item in paginated_results:
         item.pop("job_rank_score", None)
+
+    return {
+        "metadata": {"total_records": total_count, "total_pages": total_pages, "current_page": current_page, "limit": limit},
+        "results": paginated_results
+    }
         # item.pop("skill_match_count", None)  # Restored as requested
 
     return {
@@ -357,9 +386,7 @@ async def search_resumes(
             "total_records": total_count,
             "total_pages": total_pages,
             "current_page": current_page,
-            "limit": limit,
-            "has_next": current_page < total_pages,
-            "has_previous": current_page > 1
+            "limit": limit
         },
         "results": paginated_results
     }
