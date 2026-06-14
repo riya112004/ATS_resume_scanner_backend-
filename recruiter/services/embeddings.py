@@ -7,8 +7,8 @@ class EmbeddingService:
         # 'all-MiniLM-L6-v2' is a fast, accurate, and lightweight local model.
         # It runs entirely on your server for FREE.
         # Note: On first run, it will automatically download the model (~80MB).
-        # self.model = SentenceTransformer('all-MiniLM-L6-v2')
-        self.model = SentenceTransformer('BAAI/bge-small-en-v1.5')
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        # self.model = SentenceTransformer('BAAI/bge-small-en-v1.5')
 
     async def generate_embedding(self, text: str) -> List[float]:
         """Generates an embedding locally using sentence-transformers."""
