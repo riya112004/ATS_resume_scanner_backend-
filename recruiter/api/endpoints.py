@@ -125,11 +125,30 @@ async def upload_resumes(
                 parsed_data = await parser.parse_resume_text(raw_text)
                 logger.info(f"STEP 2 DONE - AI parsed for {parsed_data.name}")
                 
-                # 3. GENERATE IDENTITY HASH
+                # 3. VALIDATE PARSED RESUME BEFORE DEDUPLICATION
+                invalid_name = (
+                    not parsed_data.name 
+                    or str(parsed_data.name).strip().lower() in ["unknown", "null", "none"]
+                )
+
+                invalid_email = (
+                    not str(parsed_data.email) 
+                    or str(parsed_data.email).strip().lower() in ["none", "null", "unknown", ""]             
+                )
+
+                if invalid_name or invalid_email:
+                    logger.warning(f"INVALID RESUME - Missing valid name/email in {file.filename}")
+                    return {
+                        "filename": file.filename,
+                        "status": "invalid_resume",
+                        "message": "Invalid resume content. Please upload a valid resume PDF with candidate details."
+                    }
+                              
+                # 4. GENERATE IDENTITY HASH
                 identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
                 
-                # 4. ULTRA-STRICT DUPLICATE CHECK
-                logger.info(f"STEP 4 - Checking duplicates in MongoDB...")
+                # 5. ULTRA-STRICT DUPLICATE CHECK
+                logger.info(f"STEP 5 - Checking duplicates in MongoDB...")
                 duplicate_query = {
                     "$or": [
                         {"identity_hash": identity_hash},
@@ -148,7 +167,7 @@ async def upload_resumes(
                         "resumeURL": existing.get("resumeURL")
                     }
 
-                # 5. SAVE FILE LOCALLY
+                # 6. SAVE FILE LOCALLY
                 file_uuid = str(uuid.uuid4())
                 extension = os.path.splitext(file.filename)[1]
                 new_filename = f"{file_uuid}{extension}"
@@ -159,8 +178,8 @@ async def upload_resumes(
                 
                 relative_url = f"/uploads/{new_filename}"
 
-                # 6. AI TASKS (Parallel)
-                logger.info(f"STEP 6 - Generating embeddings and matching...")
+                # 7. AI TASKS (Parallel)
+                logger.info(f"STEP 7 - Generating embeddings and matching...")
                 parsed_text = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)}"
                 
                 embedding = await embedding_service.generate_embedding(parsed_text.strip())
@@ -169,8 +188,8 @@ async def upload_resumes(
                 if job_description:
                     match_score = await calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding)
 
-                # 7. SAVE TO MONGODB
-                logger.info(f"STEP 7 - Saving to MongoDB...")
+                # 8. SAVE TO MONGODB
+                logger.info(f"STEP 8 - Saving to MongoDB...")
                 
                 await db.db["recruiter's resume"].insert_one({
                     "identity_hash": identity_hash,
@@ -181,7 +200,7 @@ async def upload_resumes(
                     "raw_content": raw_text,
                     "updated_at": uuid.uuid4().hex
                 })
-                logger.info(f"STEP 7 DONE - Saved successfully.")
+                logger.info(f"STEP 8 DONE - Saved successfully.")
                 
                 return {
                     "filename": file.filename,

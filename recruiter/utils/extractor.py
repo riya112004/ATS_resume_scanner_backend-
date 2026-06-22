@@ -29,9 +29,16 @@ async def extract_text_from_file(file_path: str = None, file_content: bytes = No
     
     if ext == ".pdf":
         text = await extract_text_from_pdf(file_path, file_content)
+
         if not text or len(text.strip()) < 10:
-            print("Normal PDF extraction failed. Attempting OCR...")
-            text = await extract_text_with_ocr(file_path, file_content)
+           print("Normal PDF extraction failed. Attempting OCR...")
+           text = await extract_text_with_ocr(file_path, file_content)
+
+        # FINAL VALIDATION AFTER OCR
+        if not text or len(text.strip()) < 50:
+           raise ValueError(
+               "Invalid document. Unable to extract sufficient resume content."
+          )
         return text
     elif ext in [".webp", ".png", ".jpg", ".jpeg"]:
         print(f"Image file detected ({ext}). Using OCR directly...")

@@ -73,6 +73,36 @@ class AIParser:
             )
             
             raw_data = json.loads(response.choices[0].message.content)
+            # RESUME VALIDITY CHECK
+            name = raw_data.get("name")
+            email = raw_data.get("email")
+            phone = raw_data.get("phone_number")
+            skills = raw_data.get("skills", [])
+            education = raw_data.get("education", [])
+            companies = raw_data.get("companies", [])
+            job_title = raw_data.get("job_title")
+
+            def is_valid_text(value):
+                return value and str(value).strip().lower() not in ["unknown", "none", "null", "n/a", ""]
+
+            has_name = is_valid_text(name)
+            has_email = is_valid_text(email)
+            has_phone = is_valid_text(phone)
+            has_skills = isinstance(skills, list) and len([s for s in skills if is_valid_text(s)]) > 0
+            has_education = isinstance(education, list) and len([e for e in education if is_valid_text(e)]) > 0
+            has_experience = isinstance(companies, list) and len(companies) > 0
+            has_job_title = is_valid_text(job_title)
+
+            is_valid_resume = (
+                (has_name and has_email) or
+                (has_email and has_skills) or
+                (has_phone and has_skills and (has_education or has_experience)) or
+                (has_name and has_skills and (has_education or has_experience or has_job_title))
+            )
+
+            if not is_valid_resume:
+                raise ValueError("Invalid resume content. Required candidate details were not found.")
+            
             
             # 1. Normalize skills
             clean_skills = [s.strip().lower() for s in raw_data.get("skills", []) if s and str(s).strip()]
