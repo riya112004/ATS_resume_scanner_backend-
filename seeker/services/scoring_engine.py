@@ -1,5 +1,5 @@
 from seeker.models.analysis_schema import ScoreBreakdown
-from typing import List, Dict
+from typing import List
 
 class ScoringEngine:
     # --- Universal Weight Profile (Fair for all industries) ---

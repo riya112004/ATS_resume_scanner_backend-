@@ -3,12 +3,9 @@ import uuid
 import logging
 import time
 import re
-from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Query
-from recruiter.core.config import settings
 from recruiter.utils.extractor import extract_text_from_file
-from recruiter.core.database import db
 from recruiter.services.embeddings import embedding_service
 from seeker.services.analysis_manager import analysis_manager
 
@@ -170,5 +167,4 @@ async def analyze_seeker_resume(
         raise
     except Exception as e:
         logger.error(f"[{request_id}] CRITICAL SYSTEM ERROR - {str(e)}")
-        if os.path.exists(file_path): os.remove(file_path)
         raise HTTPException(status_code=500, detail="Internal server error occurred.")

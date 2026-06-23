@@ -1,11 +1,10 @@
 import asyncio
-from typing import List
 from seeker.services.resume_parser import resume_parser
 from seeker.services.jd_parser import jd_parser
 from seeker.services.matching_engine import matcher
 from seeker.services.scoring_engine import scoring_engine
 from seeker.services.feedback import feedback_service
-from seeker.models.analysis_schema import AnalysisResult, ScoreBreakdown
+from seeker.models.analysis_schema import ScoreBreakdown
 
 from dateutil import parser as date_parser
 from datetime import datetime

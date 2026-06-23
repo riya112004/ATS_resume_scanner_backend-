@@ -5,7 +5,6 @@ from pydantic import BaseModel
 from typing import List, Optional
 from recruiter.core.config import settings
 from recruiter.utils.experience_manager import exp_manager
-from recruiter.utils.location_manager import loc_manager
 
 class ResumeData(BaseModel):
     name: Optional[str] = "Unknown"

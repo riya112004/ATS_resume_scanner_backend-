@@ -30,15 +30,4 @@ class SeekerNormalizer:
         s = self.clean_string(skill)
         return self.COMMON_MAPPINGS.get(s, s)
 
-    def normalize_role(self, role: str) -> str:
-        # Standardize basic cleaning; rely on AI for role semantic matching
-        return self.clean_string(role)
-
-    def normalize_skills_list(self, skills: list) -> list:
-        return list(set(self.normalize_skill(s) for s in skills if s))
-
-    def normalize_text(self, text: str) -> str:
-        if not text: return ""
-        return self.clean_string(text)
-
 normalizer = SeekerNormalizer()

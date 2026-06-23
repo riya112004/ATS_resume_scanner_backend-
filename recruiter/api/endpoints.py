@@ -1,6 +1,5 @@
 import os
 import uuid
-import numpy as np
 import re
 import logging
 import asyncio
@@ -49,55 +48,11 @@ def is_valid_location_query(query: str) -> bool:
         return False
     return True
 
-def rank_job_results(results: List[Dict], original_query: str, skill_query: Optional[str] = None) -> List[Dict]:
-    # 1. Clean Skill Query
-    target_skills = []
-    if skill_query:
-        target_skills = [s.strip().lower() for s in skill_query.split(",") if s.strip()]
-
-    for res in results:
-        # 2. Count Matched Skills
-        matched_count = 0
-        resume_skills = [s.lower() for s in res.get("extracted_data", {}).get("skills", [])]
-        for ts in target_skills:
-            if any(ts in rs for rs in resume_skills):
-                matched_count += 1
-        res["skill_match_count"] = matched_count
-
-        # 3. Job Title Score (Universal Semantic Matching)
-        title_score = 0
-        if original_query:
-            q_lower = original_query.lower().strip()
-            title = normalize_val(res.get("extracted_data", {}).get("job_title", ""))
-            if title == q_lower: title_score = 100
-            elif q_lower in title: title_score = 80
-            else:
-                tokens = q_lower.split()
-                if any(t in title for t in tokens): title_score = 50
-                else: title_score = 20
-        res["job_rank_score"] = title_score
-        
-    # 4. Final MULTI-LEVEL Sort:
-    # Priority 1: Semantic Match Score (Highest first)
-    # Priority 2: Most Skills Matched (Descending)
-    # Priority 3: Job Title Match (Highest first)
-    # Priority 4: Experience (Descending)
-    results.sort(key=lambda x: (
-        -x.get("match_score", 0),
-        -x.get("skill_match_count", 0),
-        -x.get("job_rank_score", 0), 
-        -x.get("extracted_data", {}).get("experience", 0)
-    ))
-    return results
-
 from recruiter.utils.hashing import generate_identity_hash
 
 # --- SEMAPHORE (Limit concurrency) ---
 MAX_CONCURRENT_TASKS = 5
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
-
-from fastapi.responses import StreamingResponse
-import io
 
 @router.post("/upload")
 async def upload_resumes(
@@ -180,9 +135,7 @@ async def upload_resumes(
 
                 # 7. AI TASKS (Parallel)
                 logger.info(f"STEP 7 - Generating embeddings and matching...")
-                parsed_text = f"Name: {parsed_data.name} Title: {parsed_data.job_title} Skills: {', '.join(parsed_data.skills)}"
-                
-                embedding = await embedding_service.generate_embedding(parsed_text.strip())
+                embedding = await embedding_service.generate_embedding(raw_text[:2000].strip())
                 
                 match_score = 0.0
                 if job_description:
@@ -350,7 +303,9 @@ async def search_resumes(
         if query_embedding and "embedding" in res:
             vector_score = await recruiter_scoring.calculate_vector_score(query_embedding, res["embedding"])
         
-        res["match_score"] = recruiter_scoring.apply_location_boost(vector_score, search_loc_parts, res.get("extracted_data", {}))
+        res["semantic_score"] = round(vector_score, 2)
+        base_score = recruiter_scoring.apply_location_boost(vector_score, search_loc_parts, res.get("extracted_data", {}))
+        res["match_score"] = base_score
         
         # Keyword Frequency Boost
         res["keyword_occurrence_count"] = 0
@@ -369,10 +324,11 @@ async def search_resumes(
                 matches = re.findall(rf"\b{re.escape(kw)}\b" if ' ' not in kw else re.escape(kw), raw_lower)
                 total_occ += len(matches)
             res["keyword_occurrence_count"] = total_occ
-            res["match_score"] += float(total_occ * 0.5)
+            keyword_boost = float(total_occ * 0.5)
+            res["keyword_boost"] = keyword_boost
+            res["match_score"] = round(base_score + keyword_boost, 2)
         
         res.pop("embedding", None)
-        res.pop("raw_content", None)
         res.pop("updated_at", None)
         scored_results.append(res)
 
@@ -396,16 +352,5 @@ async def search_resumes(
 
     return {
         "metadata": {"total_records": total_count, "total_pages": total_pages, "current_page": current_page, "limit": limit},
-        "results": paginated_results
-    }
-        # item.pop("skill_match_count", None)  # Restored as requested
-
-    return {
-        "metadata": {
-            "total_records": total_count,
-            "total_pages": total_pages,
-            "current_page": current_page,
-            "limit": limit
-        },
         "results": paginated_results
     }

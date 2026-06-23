@@ -1,4 +1,4 @@
-from typing import List, Dict
+from typing import List
 from seeker.models.analysis_schema import ParsedResume, ParsedJD, ScoreBreakdown
 
 class FeedbackService:

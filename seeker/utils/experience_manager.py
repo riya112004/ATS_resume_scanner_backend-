@@ -1,4 +1,3 @@
-import math
 from datetime import datetime
 from dateutil import parser as date_parser
 from typing import List, Dict, Optional

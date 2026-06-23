@@ -1,7 +1,5 @@
 import asyncio
 from recruiter.core.database import db
-from recruiter.core.config import settings
-import os
 
 async def count():
     # Simulate startup_db_client

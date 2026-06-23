@@ -1,7 +1,5 @@
 import numpy as np
-import re
 from typing import List, Dict, Optional
-from recruiter.services.embeddings import embedding_service
 
 class RecruiterScoringEngine:
     def __init__(self):
@@ -9,7 +7,6 @@ class RecruiterScoringEngine:
         self.SEMANTIC_WEIGHT = 1.0
 
     async def calculate_vector_score(self, query_embedding: List[float], resume_embedding: List[float]) -> float:
-        """Calculates cosine similarity between two embeddings."""
         if not query_embedding or not resume_embedding:
             return 0.0
         
@@ -18,7 +15,6 @@ class RecruiterScoringEngine:
         return float(round(similarity * 100, 2))
 
     def apply_location_boost(self, base_score: float, search_loc_parts: List[str], res_data: Dict) -> float:
-        """Applies a boost if the resume location matches search criteria."""
         if not search_loc_parts:
             return base_score
             
@@ -32,32 +28,6 @@ class RecruiterScoringEngine:
             return round(base_score * self.LOCATION_BOOST, 2)
             
         return base_score
-
-    def count_keyword_occurrences(self, raw_text: str, keywords: str) -> int:
-        """Counts total occurrences of keywords in raw text using word boundaries."""
-        if not raw_text or not keywords:
-            return 0
-            
-        # Clean keywords and split into tokens
-        tokens = [t.strip().lower() for t in re.split(r'[,\s/]+', keywords) if len(t.strip()) > 1]
-        if not tokens:
-            return 0
-            
-        raw_lower = raw_text.lower()
-        total_occurrences = 0
-        
-        for token in set(tokens): # Use set to avoid double counting
-            # Use regex with word boundaries for accuracy
-            matches = re.findall(r'\b' + re.escape(token) + r'\b', raw_lower)
-            total_occurrences += len(matches)
-            
-        return total_occurrences
-
-    def calculate_frequency_boost(self, raw_text: str, keywords: str) -> float:
-        """Calculates a boost based on keyword frequency in raw text."""
-        occurrences = self.count_keyword_occurrences(raw_text, keywords)
-        # Boost: Each occurrence adds 2 points to the score
-        return float(occurrences * 2.0)
 
     def rank_results(self, results: List[Dict], original_query: Optional[str] = None, skill_query: Optional[str] = None) -> List[Dict]:
         """
