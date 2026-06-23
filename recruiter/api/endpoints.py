@@ -174,7 +174,7 @@ from math import ceil
 
 @router.get("/search")
 async def search_resumes(
-    query: Optional[str] = Query(None), # Dedicated Boolean Explorer Parameter
+    query: Optional[str] = Query(None),
     min_experience: Optional[float] = None,
     max_experience: Optional[float] = None,
     location: Optional[str] = None,
@@ -185,10 +185,17 @@ async def search_resumes(
     current_page: int = Query(1, ge=1),
     limit: int = Query(10, ge=1, le=100)
 ):
+    # Auto-detect Boolean syntax in job_title (only if boolean operators present, not just parentheses)
+    if job_title and re.search(r'\b(?:AND|OR|NOT|NOR|XOR|NAND|XNOR)\b', job_title, re.IGNORECASE):
+        logger.info(f"Boolean syntax detected in job_title. Auto-switching to boolean mode.")
+        is_boolean = True
+        query = job_title
+        job_title = None
+
     mongo_filter = {}
     combined_filters = []
     
-    # --- 1. Boolean Search Logic (Dedicated Query Parameter) ---
+    # --- 1. Boolean Search Logic ---
     if is_boolean:
         # Use ONLY the 'query' parameter for the Boolean logic
         if query:
@@ -327,6 +334,7 @@ async def search_resumes(
             keyword_boost = float(total_occ * 0.5)
             res["keyword_boost"] = keyword_boost
             res["match_score"] = round(base_score + keyword_boost, 2)
+        res["match_score"] = min(res.get("match_score", 0), 99.0)
         
         res.pop("embedding", None)
         res.pop("updated_at", None)
