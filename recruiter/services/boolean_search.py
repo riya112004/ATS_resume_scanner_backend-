@@ -65,12 +65,28 @@ class BooleanSearchEngine:
 
         # 2. Final string formatting
         expr = " ".join(processed_tokens)
-        
+
         # Advanced Logic Fixes (NAND, NOR, XNOR)
-        # We handle these by replacing the surrounding Booleans
         expr = re.sub(r'(\bTrue\b|\bFalse\b)\s+NAND\s+(\bTrue\b|\bFalse\b)', r'not (\1 and \2)', expr)
         expr = re.sub(r'(\bTrue\b|\bFalse\b)\s+NOR\s+(\bTrue\b|\bFalse\b)', r'not (\1 or \2)', expr)
         expr = re.sub(r'(\bTrue\b|\bFalse\b)\s+XNOR\s+(\bTrue\b|\bFalse\b)', r'(\1 == \2)', expr)
+
+        # 3. Group OR clauses so AND terms remain globally required.
+        #    "True and False and True or True" → "True and False and (True or True)"
+        #    Skips if the term before OR is negated by NOT.
+        parts = expr.split()
+        i = 0
+        while i < len(parts) - 2:
+            if parts[i] in ("True", "False") and parts[i+1] == "or" and parts[i+2] in ("True", "False"):
+                if i >= 1 and parts[i-1] == "not":
+                    i += 1
+                    continue
+                parts[i] = f"({parts[i]}"
+                parts[i+2] = f"{parts[i+2]})"
+                i += 3
+            else:
+                i += 1
+        expr = " ".join(parts)
 
         try:
             result = eval(expr)

@@ -50,6 +50,9 @@ def is_valid_location_query(query: str) -> bool:
 
 from recruiter.utils.hashing import generate_identity_hash
 
+# --- In-memory upload progress store ---
+upload_progress: Dict[str, dict] = {}
+
 # --- SEMAPHORE (Limit concurrency) ---
 MAX_CONCURRENT_TASKS = 5
 semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
@@ -59,116 +62,125 @@ async def upload_resumes(
     files: List[UploadFile] = File(...),
     job_description: Optional[str] = Form(None)
 ):
+    batch_id = str(uuid.uuid4())
+    logger.info(f"Upload request received for {len(files)} files. Batch: {batch_id}")
+
+    upload_progress[batch_id] = {
+        "total": len(files),
+        "done": 0,
+        "status": "processing",
+        "results": []
+    }
+
+    file_data = []
+    for f in files:
+        content = await f.read()
+        file_data.append({"filename": f.filename, "content": content})
+
+    asyncio.create_task(process_upload_background(batch_id, file_data, job_description))
+
+    return {"batch_id": batch_id, "total": len(files)}
+
+async def process_upload_background(batch_id: str, file_data: List[dict], job_description: Optional[str] = None):
     upload_start = time.time()
-    logger.info(f"Upload request received for {len(files)} files. Limit: {MAX_CONCURRENT_TASKS}.")
-    
-    # Pre-calculate JD Embedding once
+
     jd_embedding = None
     if job_description:
         jd_embedding = await embedding_service.generate_embedding(job_description)
 
-    async def process_single_file(file: UploadFile):
+    async def process_single_file(item: dict):
         async with semaphore:
-            start_time = time.time()
             try:
-                # 1. READ FILE CONTENT
-                file_content = await file.read()
-                
-                # 2. EXTRACTION & AI PARSING
-                logger.info(f"STEP 2 - Extracting text and AI parsing for {file.filename}...")
-                raw_text = await extract_text_from_file(file_content=file_content, filename=file.filename)
+                file_content = item["content"]
+                filename = item["filename"]
+                raw_text = await extract_text_from_file(file_content=file_content, filename=filename)
                 parsed_data = await parser.parse_resume_text(raw_text)
-                logger.info(f"STEP 2 DONE - AI parsed for {parsed_data.name}")
-                
-                # 3. VALIDATE PARSED RESUME BEFORE DEDUPLICATION
+
                 invalid_name = (
-                    not parsed_data.name 
+                    not parsed_data.name
                     or str(parsed_data.name).strip().lower() in ["unknown", "null", "none"]
                 )
-
                 invalid_email = (
-                    not str(parsed_data.email) 
-                    or str(parsed_data.email).strip().lower() in ["none", "null", "unknown", ""]             
+                    not str(parsed_data.email)
+                    or str(parsed_data.email).strip().lower() in ["none", "null", "unknown", ""]
                 )
 
                 if invalid_name or invalid_email:
-                    logger.warning(f"INVALID RESUME - Missing valid name/email in {file.filename}")
-                    return {
-                        "filename": file.filename,
-                        "status": "invalid_resume",
-                        "message": "Invalid resume content. Please upload a valid resume PDF with candidate details."
-                    }
-                              
-                # 4. GENERATE IDENTITY HASH
+                    logger.warning(f"INVALID RESUME - Missing valid name/email in {filename}")
+                    return {"filename": filename, "status": "invalid_resume", "message": "Invalid resume content. Please upload a valid resume PDF with candidate details."}
+
                 identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
-                
-                # 5. ULTRA-STRICT DUPLICATE CHECK
-                logger.info(f"STEP 5 - Checking duplicates in MongoDB...")
+
                 duplicate_query = {
                     "$or": [
                         {"identity_hash": identity_hash},
                         {"extracted_data.email": {"$regex": f"^{re.escape(str(parsed_data.email).strip())}$", "$options": "i"}}
                     ]
                 }
-                
+
                 existing = await db.db["recruiter's resume"].find_one(duplicate_query)
                 if existing:
                     logger.info(f"DUPLICATE - Found for {parsed_data.name}")
-                    return {
-                        "filename": file.filename,
-                        "status": "duplicate_resume",
-                        "message": f"Candidate {parsed_data.name} already exists.",
-                        "identity_hash": identity_hash,
-                        "resumeURL": existing.get("resumeURL")
-                    }
+                    return {"filename": filename, "status": "duplicate_resume", "message": f"Candidate {parsed_data.name} already exists.", "identity_hash": identity_hash, "resumeURL": existing.get("resumeURL")}
 
-                # 6. SAVE FILE LOCALLY
                 file_uuid = str(uuid.uuid4())
-                extension = os.path.splitext(file.filename)[1]
+                extension = os.path.splitext(filename)[1]
                 new_filename = f"{file_uuid}{extension}"
                 file_path = os.path.join(settings.UPLOAD_DIR, new_filename)
-                
+
                 with open(file_path, "wb") as f:
                     f.write(file_content)
-                
+
                 relative_url = f"/uploads/{new_filename}"
 
-                # 7. AI TASKS (Parallel)
-                logger.info(f"STEP 7 - Generating embeddings and matching...")
                 embedding = await embedding_service.generate_embedding(raw_text[:2000].strip())
-                
+
                 match_score = 0.0
                 if job_description:
                     match_score = await calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding)
 
-                # 8. SAVE TO MONGODB
-                logger.info(f"STEP 8 - Saving to MongoDB...")
-                
                 await db.db["recruiter's resume"].insert_one({
                     "identity_hash": identity_hash,
-                    "filename": file.filename,
+                    "filename": filename,
                     "resumeURL": relative_url,
                     "extracted_data": parsed_data.dict(),
                     "embedding": embedding,
                     "raw_content": raw_text,
                     "updated_at": uuid.uuid4().hex
                 })
-                logger.info(f"STEP 8 DONE - Saved successfully.")
-                
-                return {
-                    "filename": file.filename,
-                    "status": "success",
-                    "match_score": match_score,
-                    "identity_hash": identity_hash,
-                    "resumeURL": f"{settings.BASE_URL}{relative_url}"
-                }
-            except Exception as e:
-                logger.error(f"Error {file.filename}: {str(e)}")
-                return {"filename": file.filename, "error": str(e)}
 
-    tasks = [process_single_file(file) for file in files]
-    results = await asyncio.gather(*tasks)
-    return results
+                return {"filename": filename, "status": "success", "match_score": match_score, "identity_hash": identity_hash, "resumeURL": f"{settings.BASE_URL}{relative_url}"}
+            except Exception as e:
+                logger.error(f"Error {filename}: {str(e)}")
+                return {"filename": filename, "error": str(e)}
+
+    tasks = [process_single_file(item) for item in file_data]
+    for coro in asyncio.as_completed(tasks):
+        result = await coro
+        progress = upload_progress.get(batch_id)
+        if progress:
+            progress["done"] += 1
+            progress["results"].append(result)
+
+    progress = upload_progress.get(batch_id)
+    if progress:
+        progress["status"] = "completed"
+
+    duration = time.time() - upload_start
+    logger.info(f"Batch {batch_id} completed in {duration:.2f}s")
+
+@router.get("/upload-status/{batch_id}")
+async def get_upload_status(batch_id: str):
+    progress = upload_progress.get(batch_id)
+    if not progress:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return {
+        "batch_id": batch_id,
+        "total": progress["total"],
+        "done": progress["done"],
+        "status": progress["status"],
+        "results": progress["results"] if progress["status"] == "completed" else []
+    }
 
 from math import ceil
 

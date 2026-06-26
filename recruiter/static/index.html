@@ -128,7 +128,7 @@
     <script>
         const API_BASE = "/api";
 
-        // Upload Logic
+        // Upload Logic with Live Progress
         document.getElementById('uploadForm').onsubmit = async (e) => {
             e.preventDefault();
             const btn = document.getElementById('uploadBtn');
@@ -143,25 +143,32 @@
             if(jd) formData.append('job_description', jd);
 
             btn.disabled = true;
-            status.innerHTML = `Processing ${files.length} resumes with AI... Please wait.`;
+            status.innerHTML = `Uploading ${files.length} files...`;
 
             try {
-                const res = await fetch(`${API_BASE}/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
-                const results = await res.json();
-                
-                if(res.ok) {
-                    let successCount = results.filter(r => r.status === 'success').length;
-                    status.innerHTML = `<span style="color:green">Completed! Successfully parsed ${successCount} out of ${results.length} files. Check console for details.</span>`;
-                    console.log("Upload Results:", results);
-                } else {
-                    status.innerHTML = `<span style="color:red">Error: ${results.detail || 'Upload failed'}</span>`;
-                }
+                const res = await fetch(`${API_BASE}/upload`, { method: 'POST', body: formData });
+                const { batch_id, total } = await res.json();
+                status.innerHTML = `Processing ${total} resumes: <span id="progressCount">0/${total}</span>`;
+
+                const interval = setInterval(async () => {
+                    try {
+                        const statusRes = await fetch(`${API_BASE}/upload-status/${batch_id}`);
+                        const progress = await statusRes.json();
+                        document.getElementById('progressCount').innerText = `${progress.done}/${total}`;
+
+                        if (progress.status === "completed") {
+                            clearInterval(interval);
+                            let successCount = progress.results.filter(r => r.status === 'success').length;
+                            status.innerHTML = `<span style="color:green">Complete! ${successCount}/${total} parsed successfully.</span>`;
+                            console.log("Upload Results:", progress.results);
+                            btn.disabled = false;
+                        }
+                    } catch (e) {
+                        console.error("Poll error:", e);
+                    }
+                }, 1000);
             } catch (err) {
                 status.innerHTML = `<span style="color:red">Upload failed. Check server connection.</span>`;
-            } finally {
                 btn.disabled = false;
             }
         };
