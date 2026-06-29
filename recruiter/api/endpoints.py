@@ -3,12 +3,12 @@ import uuid
 import re
 import logging
 import asyncio
-import time
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Query
 from typing import List, Optional, Dict
 from recruiter.core.config import settings
 from recruiter.core.database import db
 from recruiter.utils.extractor import extract_text_from_file
+from recruiter.utils.compressor import compress_file
 from recruiter.services.parser import parser
 from recruiter.services.embeddings import embedding_service
 from recruiter.services.matching import calculate_match_score
@@ -48,20 +48,123 @@ def is_valid_location_query(query: str) -> bool:
         return False
     return True
 
+import shutil
 from recruiter.utils.hashing import generate_identity_hash
 
 # --- In-memory upload progress store ---
 upload_progress: Dict[str, dict] = {}
 
-# --- SEMAPHORE (Limit concurrency) ---
-MAX_CONCURRENT_TASKS = 5
-semaphore = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+# --- DISK-BASED QUEUE + WORKER POOL (temp_uploads/) ---
+upload_queue: asyncio.Queue = asyncio.Queue()
+WORKER_COUNT = 5
+_workers_started = False
+
+async def _ensure_workers():
+    global _workers_started
+    if _workers_started:
+        return
+    _workers_started = True
+    for i in range(WORKER_COUNT):
+        asyncio.create_task(_worker_loop(i))
+    logger.info(f"Started {WORKER_COUNT} upload workers")
+
+async def _worker_loop(worker_id: int):
+    while True:
+        item = await upload_queue.get()
+        try:
+            await _process_one(item, worker_id)
+        except Exception as e:
+            logger.error(f"Worker {worker_id} fatal error: {e}")
+        finally:
+            upload_queue.task_done()
+
+async def _process_one(item: dict, worker_id: int):
+    temp_path = item["temp_path"]
+    orig_filename = item["orig_filename"]
+    batch_id = item["batch_id"]
+    new_filename = item["new_filename"]
+    jd_embedding = item.get("jd_embedding")
+    job_description = item.get("job_description")
+
+    try:
+        raw_text = await extract_text_from_file(file_path=temp_path, filename=orig_filename)
+        parsed_data = await parser.parse_resume_text(raw_text)
+
+        invalid_name = (
+            not parsed_data.name
+            or str(parsed_data.name).strip().lower() in ["unknown", "null", "none"]
+        )
+        invalid_email = (
+            not str(parsed_data.email)
+            or str(parsed_data.email).strip().lower() in ["none", "null", "unknown", ""]
+        )
+
+        if invalid_name or invalid_email:
+            logger.warning(f"Worker {worker_id} | INVALID - {orig_filename} (missing name/email)")
+            os.remove(temp_path)
+            _record_result(batch_id, {"filename": orig_filename, "status": "invalid_resume", "message": "Invalid resume content. Please upload a valid resume PDF with candidate details."})
+            return
+
+        identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
+
+        duplicate_query = {
+            "$or": [
+                {"identity_hash": identity_hash},
+                {"extracted_data.email": {"$regex": f"^{re.escape(str(parsed_data.email).strip())}$", "$options": "i"}}
+            ]
+        }
+
+        existing = await db.db["recruiter's resume"].find_one(duplicate_query)
+        if existing:
+            logger.info(f"Worker {worker_id} | DUPLICATE - {parsed_data.name}")
+            os.remove(temp_path)
+            _record_result(batch_id, {"filename": orig_filename, "status": "duplicate_resume", "message": f"Candidate {parsed_data.name} already exists.", "identity_hash": identity_hash, "resumeURL": existing.get("resumeURL")})
+            return
+
+        # Move from temp_uploads/ → uploads/
+        perm_path = os.path.join(settings.UPLOAD_DIR, new_filename)
+        shutil.move(temp_path, perm_path)
+
+        relative_url = f"/uploads/{new_filename}"
+
+        embedding = await embedding_service.generate_embedding(raw_text[:2000].strip())
+
+        match_score = 0.0
+        if job_description:
+            match_score = await calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding)
+
+        await db.db["recruiter's resume"].insert_one({
+            "identity_hash": identity_hash,
+            "filename": orig_filename,
+            "resumeURL": relative_url,
+            "extracted_data": parsed_data.dict(),
+            "embedding": embedding,
+            "raw_content": raw_text,
+            "updated_at": uuid.uuid4().hex
+        })
+
+        _record_result(batch_id, {"filename": orig_filename, "status": "success", "match_score": match_score, "identity_hash": identity_hash, "resumeURL": f"{settings.BASE_URL}{relative_url}"})
+    except Exception as e:
+        logger.error(f"Worker {worker_id} | Error {orig_filename}: {str(e)}")
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        _record_result(batch_id, {"filename": orig_filename, "error": str(e)})
+
+def _record_result(batch_id: str, result: dict):
+    progress = upload_progress.get(batch_id)
+    if progress:
+        progress["done"] += 1
+        progress["results"].append(result)
+        if progress["done"] >= progress["total"]:
+            progress["status"] = "completed"
 
 @router.post("/upload")
 async def upload_resumes(
     files: List[UploadFile] = File(...),
     job_description: Optional[str] = Form(None)
 ):
+    await _ensure_workers()
+
     batch_id = str(uuid.uuid4())
     logger.info(f"Upload request received for {len(files)} files. Batch: {batch_id}")
 
@@ -72,102 +175,35 @@ async def upload_resumes(
         "results": []
     }
 
-    file_data = []
-    for f in files:
-        content = await f.read()
-        file_data.append({"filename": f.filename, "content": content})
-
-    asyncio.create_task(process_upload_background(batch_id, file_data, job_description))
-
-    return {"batch_id": batch_id, "total": len(files)}
-
-async def process_upload_background(batch_id: str, file_data: List[dict], job_description: Optional[str] = None):
-    upload_start = time.time()
-
+    # JD embedding — compute once
     jd_embedding = None
     if job_description:
         jd_embedding = await embedding_service.generate_embedding(job_description)
 
-    async def process_single_file(item: dict):
-        async with semaphore:
-            try:
-                file_content = item["content"]
-                filename = item["filename"]
-                raw_text = await extract_text_from_file(file_content=file_content, filename=filename)
-                parsed_data = await parser.parse_resume_text(raw_text)
+    for f in files:
+        content = await f.read()
+        ext = os.path.splitext(f.filename)[1]
+        file_uuid = str(uuid.uuid4())
+        new_filename = f"{file_uuid}{ext}"
 
-                invalid_name = (
-                    not parsed_data.name
-                    or str(parsed_data.name).strip().lower() in ["unknown", "null", "none"]
-                )
-                invalid_email = (
-                    not str(parsed_data.email)
-                    or str(parsed_data.email).strip().lower() in ["none", "null", "unknown", ""]
-                )
+        # Save to disk-based temp folder immediately (not held in RAM)
+        temp_path = os.path.join(settings.TEMP_UPLOAD_DIR, new_filename)
+        with open(temp_path, "wb") as out:
+            out.write(content)
 
-                if invalid_name or invalid_email:
-                    logger.warning(f"INVALID RESUME - Missing valid name/email in {filename}")
-                    return {"filename": filename, "status": "invalid_resume", "message": "Invalid resume content. Please upload a valid resume PDF with candidate details."}
+        # Compress immediately — kam space lega chahe temp ho ya permanent
+        await compress_file(temp_path, f.filename)
 
-                identity_hash = generate_identity_hash(parsed_data.name, parsed_data.email)
+        await upload_queue.put({
+            "temp_path": temp_path,
+            "orig_filename": f.filename,
+            "new_filename": new_filename,
+            "batch_id": batch_id,
+            "jd_embedding": jd_embedding,
+            "job_description": job_description,
+        })
 
-                duplicate_query = {
-                    "$or": [
-                        {"identity_hash": identity_hash},
-                        {"extracted_data.email": {"$regex": f"^{re.escape(str(parsed_data.email).strip())}$", "$options": "i"}}
-                    ]
-                }
-
-                existing = await db.db["recruiter's resume"].find_one(duplicate_query)
-                if existing:
-                    logger.info(f"DUPLICATE - Found for {parsed_data.name}")
-                    return {"filename": filename, "status": "duplicate_resume", "message": f"Candidate {parsed_data.name} already exists.", "identity_hash": identity_hash, "resumeURL": existing.get("resumeURL")}
-
-                file_uuid = str(uuid.uuid4())
-                extension = os.path.splitext(filename)[1]
-                new_filename = f"{file_uuid}{extension}"
-                file_path = os.path.join(settings.UPLOAD_DIR, new_filename)
-
-                with open(file_path, "wb") as f:
-                    f.write(file_content)
-
-                relative_url = f"/uploads/{new_filename}"
-
-                embedding = await embedding_service.generate_embedding(raw_text[:2000].strip())
-
-                match_score = 0.0
-                if job_description:
-                    match_score = await calculate_match_score(raw_text, job_description, jd_embedding=jd_embedding)
-
-                await db.db["recruiter's resume"].insert_one({
-                    "identity_hash": identity_hash,
-                    "filename": filename,
-                    "resumeURL": relative_url,
-                    "extracted_data": parsed_data.dict(),
-                    "embedding": embedding,
-                    "raw_content": raw_text,
-                    "updated_at": uuid.uuid4().hex
-                })
-
-                return {"filename": filename, "status": "success", "match_score": match_score, "identity_hash": identity_hash, "resumeURL": f"{settings.BASE_URL}{relative_url}"}
-            except Exception as e:
-                logger.error(f"Error {filename}: {str(e)}")
-                return {"filename": filename, "error": str(e)}
-
-    tasks = [process_single_file(item) for item in file_data]
-    for coro in asyncio.as_completed(tasks):
-        result = await coro
-        progress = upload_progress.get(batch_id)
-        if progress:
-            progress["done"] += 1
-            progress["results"].append(result)
-
-    progress = upload_progress.get(batch_id)
-    if progress:
-        progress["status"] = "completed"
-
-    duration = time.time() - upload_start
-    logger.info(f"Batch {batch_id} completed in {duration:.2f}s")
+    return {"batch_id": batch_id, "total": len(files)}
 
 @router.get("/upload-status/{batch_id}")
 async def get_upload_status(batch_id: str):

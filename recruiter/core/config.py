@@ -8,6 +8,7 @@ class Settings:
     MONGODB_URL: str = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
     DATABASE_NAME: str = os.getenv("DATABASE_NAME", "ats_resume_db")
     UPLOAD_DIR: str = "uploads"
+    TEMP_UPLOAD_DIR: str = "temp_uploads"
     BASE_URL: str = os.getenv("BASE_URL", "http://5.161.122.193:3333")
     
     # LLM and Vector Search settings
@@ -21,6 +22,7 @@ class Settings:
 
 settings = Settings()
 
-# Ensure upload directory exists
-if not os.path.exists(settings.UPLOAD_DIR):
-    os.makedirs(settings.UPLOAD_DIR)
+# Ensure upload and temp directories exist
+for d in [settings.UPLOAD_DIR, settings.TEMP_UPLOAD_DIR]:
+    if not os.path.exists(d):
+        os.makedirs(d)
