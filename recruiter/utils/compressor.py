@@ -13,7 +13,7 @@ def compress_pdf(file_path: str, output_path: str = None):
     out_path = output_path or file_path
 
     buffer = io.BytesIO()
-    doc.save(buffer, garbage=4, deflate=True, clean=True, linear=True)
+    doc.save(buffer, garbage=4, deflate=True, clean=True)
     doc.close()
 
     compressed = buffer.getvalue()
