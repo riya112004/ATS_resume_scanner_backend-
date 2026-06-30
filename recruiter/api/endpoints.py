@@ -215,7 +215,7 @@ async def get_upload_status(batch_id: str):
         "total": progress["total"],
         "done": progress["done"],
         "status": progress["status"],
-        "results": progress["results"] if progress["status"] == "completed" else []
+        "results": progress["results"]
     }
 
 from math import ceil
@@ -329,8 +329,12 @@ async def search_resumes(
     all_resumes = await db.db["recruiter's resume"].find(mongo_filter).sort("extracted_data.experience", -1).to_list(length=10000)
     
     scored_results = []
-    # Generation text depends on mode
-    search_emb_text = query if (is_boolean and query) else f"{job_title or ''} {skills or ''} {location or ''}".strip()
+    # Strip boolean operators from embedding text so "NOT/AND/OR" don't distort semantic score
+    if is_boolean and query:
+        clean_keywords = boolean_engine.extract_keywords(query)
+        search_emb_text = " ".join(clean_keywords) if clean_keywords else query
+    else:
+        search_emb_text = f"{job_title or ''} {skills or ''} {location or ''}".strip()
     query_embedding = await embedding_service.generate_embedding(search_emb_text) if search_emb_text else None
     search_loc_parts = [p.strip() for p in location.split(",")] if location else []
 
@@ -362,21 +366,22 @@ async def search_resumes(
         base_score = recruiter_scoring.apply_location_boost(vector_score, search_loc_parts, res.get("extracted_data", {}))
         res["match_score"] = base_score
         
-        # Keyword Frequency Boost
+        # Keyword Frequency Boost (unified for both modes)
         res["keyword_occurrence_count"] = 0
         if raw_text and (query if is_boolean else job_title):
             raw_lower = raw_text.lower()
             if is_boolean:
-                search_terms = boolean_engine.extract_keywords(query)
+                kw_phrases = boolean_engine.extract_keywords(query)
+                source_text = " ".join(kw_phrases)
             else:
-                # Use ONLY job_title for frequency boost in Standard Mode
-                query_tokens = [t.strip().lower() for t in re.split(r'[,\s/]+', job_title) if len(t.strip()) > 1]
-                search_terms = [t for t in query_tokens if t.upper() not in {"DEVELOPER", "ENGINEER", "MANAGER"}]
+                source_text = job_title
+            query_tokens = [t.strip().lower() for t in re.split(r'[,\s/]+', source_text) if len(t.strip()) > 1]
+            search_terms = [t for t in query_tokens if t.upper() not in {"DEVELOPER", "ENGINEER", "MANAGER"}]
 
             total_occ = 0
             for kw in set(search_terms):
                 if not kw: continue
-                matches = re.findall(rf"\b{re.escape(kw)}\b" if ' ' not in kw else re.escape(kw), raw_lower)
+                matches = re.findall(rf"\b{re.escape(kw)}\b", raw_lower)
                 total_occ += len(matches)
             res["keyword_occurrence_count"] = total_occ
             keyword_boost = float(total_occ * 0.5)

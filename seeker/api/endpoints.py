@@ -1,12 +1,16 @@
 import os
+import re
+import time
 import uuid
 import logging
-import time
-import re
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Query
-from recruiter.utils.extractor import extract_text_from_file
+from recruiter.core.config import settings
+from recruiter.core.database import db
 from recruiter.services.embeddings import embedding_service
+from recruiter.services.parser import parser as recruiter_parser
+from recruiter.utils.extractor import extract_text_from_file
+from recruiter.utils.hashing import generate_identity_hash
 from seeker.services.analysis_manager import analysis_manager
 
 router = APIRouter()
@@ -81,7 +85,7 @@ async def analyze_seeker_resume(
         raise HTTPException(status_code=415, detail="Invalid file type. Only PDF and DOCX are allowed.")
 
     try:
-        # 3. READ FILE INTO MEMORY (NO LOCAL SAVING)
+        # 3. READ FILE INTO MEMORY
         content = await resume_file.read()
         logger.info(f"[{request_id}] STEP 1 - File read. Size: {len(content)} bytes")
         
@@ -101,10 +105,41 @@ async def analyze_seeker_resume(
              raise ValueError("Could not extract text.")
         logger.info(f"[{request_id}] STEP 3 - Text extracted. Length: {len(raw_text)} chars")
 
-        # 5. Orchestrate Analysis
-        logger.info(f"[{request_id}] STEP 4 - Starting AI Analysis Pipeline...")
+        # 5. Save file to uploads directory (for resumeURL link)
+        new_filename = f"{uuid.uuid4().hex}{ext}"
+        perm_path = os.path.join(settings.UPLOAD_DIR, new_filename)
+        with open(perm_path, "wb") as f:
+            f.write(content)
+        relative_url = f"/uploads/{new_filename}"
+        logger.info(f"[{request_id}] STEP 4 - File saved to {perm_path}")
+
+        # 6. Parse Resume using Recruiter's AI Parser (for DB storage)
+        logger.info(f"[{request_id}] STEP 5 - Parsing resume with AI parser...")
+        parsed = await recruiter_parser.parse_resume_text(raw_text)
+        logger.info(f"[{request_id}] STEP 5b - Parsed. Name: {parsed.name}, Email: {parsed.email}")
+
+        # 7. Generate Embedding + Save to Recruiter's Collection
+        embedding = await embedding_service.generate_embedding(raw_text[:2000].strip())
+        identity_hash = generate_identity_hash(parsed.name, parsed.email)
         
-        # GENERATE JD EMBEDDING (LOCAL)
+        existing = await db.db["recruiter's resume"].find_one({"identity_hash": identity_hash})
+        if existing:
+            logger.info(f"[{request_id}] STEP 6 - Duplicate resume detected. Skipping DB save.")
+        else:
+            await db.db["recruiter's resume"].insert_one({
+                "identity_hash": identity_hash,
+                "filename": resume_file.filename,
+                "resumeURL": relative_url,
+                "extracted_data": parsed.dict(),
+                "embedding": embedding,
+                "raw_content": raw_text,
+                "updated_at": uuid.uuid4().hex
+            })
+            logger.info(f"[{request_id}] STEP 6 - Resume saved to recruiter collection.")
+
+        # 8. Orchestrate ATS Analysis
+        logger.info(f"[{request_id}] STEP 7 - Starting AI Analysis Pipeline...")
+        
         jd_embedding = await embedding_service.generate_embedding(job_description)
         
         try:
@@ -114,7 +149,7 @@ async def analyze_seeker_resume(
                 job_description, 
                 candidate_experience=candidate_experience
             )
-            logger.info(f"[{request_id}] STEP 5 - AI Analysis Completed.")
+            logger.info(f"[{request_id}] STEP 8 - AI Analysis Completed.")
         except ValueError as ve:
             logger.error(f"[{request_id}] ANALYSIS FAILED - {str(ve)}")
             raise HTTPException(
@@ -122,7 +157,6 @@ async def analyze_seeker_resume(
                 detail=f"Analysis failed: {str(ve)}. Please ensure the resume file is readable and follows a standard format."
             )
 
-        # 6. Database Storage (REMOVED AS REQUESTED)
         parsed_resume = analysis_data.get("parsed_resume", {})
         contact_info = parsed_resume.get("contact", {})
         
@@ -130,13 +164,10 @@ async def analyze_seeker_resume(
         email = contact_info.get("email", "Not Found")
         overall_score = analysis_data.get("overall_ats_score", 0)
 
-        # Skipping database storage...
-        logger.info(f"[{request_id}] STEP 6 - Record storage skipped (disabled).")
-
         duration = time.time() - start_time
         logger.info(f"[{request_id}] SUCCESS - Analysis finished in {duration:.2f}s")
 
-        # 7. Simplified Response Based on 'ats' parameter
+        # 9. Simplified Response Based on 'ats' parameter
         if ats:
             return {
                 "success": True,
@@ -158,7 +189,7 @@ async def analyze_seeker_resume(
                 "missing_critical_skills": analysis_data.get("missing_critical_skills", []),
                 "warnings": analysis_data.get("warnings", []),
                 "verdict": analysis_data.get("verdict", ""),
-                "resume_url": None # File not stored
+                "resume_url": relative_url
             }
         }
 
