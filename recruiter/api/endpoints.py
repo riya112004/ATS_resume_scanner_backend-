@@ -49,6 +49,7 @@ def is_valid_location_query(query: str) -> bool:
     return True
 
 import shutil
+from copy import deepcopy
 from recruiter.utils.hashing import generate_identity_hash
 
 # --- In-memory upload progress store ---
@@ -150,6 +151,21 @@ async def _process_one(item: dict, worker_id: int):
             os.remove(temp_path)
         _record_result(batch_id, {"filename": orig_filename, "error": str(e)})
 
+    # Enqueue next pending item from this batch (maintains CHUNK_SIZE window)
+    await _enqueue_next_from_batch(batch_id)
+
+async def _enqueue_next_from_batch(batch_id: str):
+    progress = upload_progress.get(batch_id)
+    if not progress:
+        return
+    pending = progress.get("pending", [])
+    if not pending:
+        return
+    next_item = pending.pop(0)
+    # Remove deepcopy wrapper
+    await upload_queue.put(next_item)
+    progress["queued"] = progress.get("queued", 0) + 1
+
 def _record_result(batch_id: str, result: dict):
     progress = upload_progress.get(batch_id)
     if progress:
@@ -157,6 +173,7 @@ def _record_result(batch_id: str, result: dict):
         progress["results"].append(result)
         if progress["done"] >= progress["total"]:
             progress["status"] = "completed"
+            progress.pop("pending", None)
 
 @router.post("/upload")
 async def upload_resumes(
@@ -168,33 +185,26 @@ async def upload_resumes(
     batch_id = str(uuid.uuid4())
     logger.info(f"Upload request received for {len(files)} files. Batch: {batch_id}")
 
-    upload_progress[batch_id] = {
-        "total": len(files),
-        "done": 0,
-        "status": "processing",
-        "results": []
-    }
-
     # JD embedding — compute once
     jd_embedding = None
     if job_description:
         jd_embedding = await embedding_service.generate_embedding(job_description)
 
+    # Step 1: Save ALL files to temp_uploads immediately, build pending list
+    pending_items = []
     for f in files:
         content = await f.read()
         ext = os.path.splitext(f.filename)[1]
         file_uuid = str(uuid.uuid4())
         new_filename = f"{file_uuid}{ext}"
 
-        # Save to disk-based temp folder immediately (not held in RAM)
         temp_path = os.path.join(settings.TEMP_UPLOAD_DIR, new_filename)
         with open(temp_path, "wb") as out:
             out.write(content)
 
-        # Compress immediately — kam space lega chahe temp ho ya permanent
         await compress_file(temp_path, f.filename)
 
-        await upload_queue.put({
+        pending_items.append({
             "temp_path": temp_path,
             "orig_filename": f.filename,
             "new_filename": new_filename,
@@ -203,6 +213,22 @@ async def upload_resumes(
             "job_description": job_description,
         })
 
+    # Step 2: Enqueue only first chunk, rest stays pending
+    upload_progress[batch_id] = {
+        "total": len(files),
+        "done": 0,
+        "status": "processing",
+        "results": [],
+        "pending": deepcopy(pending_items),
+        "queued": 0
+    }
+
+    chunk = pending_items[:settings.CHUNK_SIZE]
+    for item in chunk:
+        await upload_queue.put(item)
+    upload_progress[batch_id]["queued"] = len(chunk)
+
+    logger.info(f"Batch {batch_id}: {len(files)} files saved, {len(chunk)} enqueued initially, {max(0, len(files) - settings.CHUNK_SIZE)} pending")
     return {"batch_id": batch_id, "total": len(files)}
 
 @router.get("/upload-status/{batch_id}")
@@ -210,10 +236,12 @@ async def get_upload_status(batch_id: str):
     progress = upload_progress.get(batch_id)
     if not progress:
         raise HTTPException(status_code=404, detail="Batch not found")
+    pending_count = len(progress.get("pending", []))
     return {
         "batch_id": batch_id,
         "total": progress["total"],
         "done": progress["done"],
+        "pending": pending_count,
         "status": progress["status"],
         "results": progress["results"]
     }

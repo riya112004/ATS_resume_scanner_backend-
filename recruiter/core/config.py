@@ -20,6 +20,9 @@ class Settings:
     # Model Configurations
     AI_MODEL: str = "gpt-4o-mini"
 
+    # Batch Processing
+    CHUNK_SIZE: int = 200
+
 settings = Settings()
 
 # Ensure upload and temp directories exist
