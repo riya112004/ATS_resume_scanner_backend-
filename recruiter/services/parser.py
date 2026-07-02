@@ -60,7 +60,7 @@ class AIParser:
         - ai_suggested_exp (numeric float or null)
 
         Resume text:
-        {text[:4000]}
+        {text[:2700]}
         """
         
         try:

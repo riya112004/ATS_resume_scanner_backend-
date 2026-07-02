@@ -51,13 +51,14 @@ def is_valid_location_query(query: str) -> bool:
 import shutil
 from copy import deepcopy
 from recruiter.utils.hashing import generate_identity_hash
+from recruiter.services.interview_engine import interview_engine, InterviewSession
 
 # --- In-memory upload progress store ---
 upload_progress: Dict[str, dict] = {}
 
 # --- DISK-BASED QUEUE + WORKER POOL (temp_uploads/) ---
 upload_queue: asyncio.Queue = asyncio.Queue()
-WORKER_COUNT = 5
+WORKER_COUNT = 10
 _workers_started = False
 
 async def _ensure_workers():
@@ -158,22 +159,24 @@ async def _enqueue_next_from_batch(batch_id: str):
     progress = upload_progress.get(batch_id)
     if not progress:
         return
+    if progress.get("status") == "completed":
+        return
     pending = progress.get("pending", [])
     if not pending:
         return
     next_item = pending.pop(0)
-    # Remove deepcopy wrapper
     await upload_queue.put(next_item)
     progress["queued"] = progress.get("queued", 0) + 1
 
 def _record_result(batch_id: str, result: dict):
     progress = upload_progress.get(batch_id)
     if progress:
-        progress["done"] += 1
+        progress["done"] = min(progress.get("done", 0) + 1, progress["total"])
         progress["results"].append(result)
         if progress["done"] >= progress["total"]:
             progress["status"] = "completed"
             progress.pop("pending", None)
+            progress.pop("queued", None)
 
 @router.post("/upload")
 async def upload_resumes(
@@ -244,6 +247,114 @@ async def get_upload_status(batch_id: str):
         "pending": pending_count,
         "status": progress["status"],
         "results": progress["results"]
+    }
+
+# --- Interview Session Store ---
+interview_sessions: Dict[str, InterviewSession] = {}
+
+def _find_question(session, question_id):
+    for b in session.batches.values():
+        for q in b:
+            if q.get("id") == question_id:
+                return q
+    return None
+
+@router.post("/interview/questions")
+async def get_interview_questions(
+    resume_url: str = Form(...),
+    job_title: str = Form(...),
+    job_description: str = Form(...),
+    experience: float = Form(...),
+    session_id: Optional[str] = Form(None),
+    batch: Optional[int] = Form(None)
+):
+    if experience < 0 or experience > 60:
+        raise HTTPException(status_code=400, detail="Experience must be between 0 and 60 years")
+    level = "fresher" if experience <= 1 else "intermediate" if experience <= 4 else "expert"
+
+    def format_questions(q_list):
+        return [{
+            "id": q.get("id"), "type": q.get("type"),
+            "skill": q.get("skill"), "difficulty": q.get("difficulty"),
+            "question": q.get("question"), "has_answer": q.get("answer") is not None,
+            "batch": q.get("batch", 1)
+        } for q in q_list]
+
+    # If session_id provided, return specific batch
+    if session_id:
+        session = interview_sessions.get(session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        target = batch if batch else (session.max_batch_generated + 1)
+        q_list = await interview_engine.get_batch(session, session.resume_text, target)
+        return {
+            "session_id": session.session_id,
+            "experience": experience,
+            "batch": target,
+            "total_batches": session.max_batch_generated,
+            "has_next": len(session.batches.get(target, [])) > 0,
+            "questions": format_questions(q_list)
+        }
+
+    # No session_id → create new session + first batch
+    from urllib.parse import urlparse
+    parsed = urlparse(resume_url)
+    search_url = parsed.path if parsed.path else resume_url
+    filename = os.path.basename(search_url)
+    resume_doc = await db.db["recruiter's resume"].find_one({
+        "$or": [
+            {"resumeURL": {"$regex": search_url, "$options": "i"}},
+            {"resumeURL": {"$regex": filename, "$options": "i"}}
+        ]
+    })
+    if not resume_doc:
+        raise HTTPException(status_code=404, detail="Resume not found")
+    resume_text = resume_doc.get("raw_content", "")
+    if not resume_text:
+        raise HTTPException(status_code=400, detail="Resume raw content not found")
+    candidate_name = resume_doc.get("extracted_data", {}).get("name", "Candidate")
+    session = await interview_engine.create_session(
+        jd_text=f"Job Title: {job_title}\n\nJob Description: {job_description}",
+        resume_text=resume_text,
+        level=level,
+        candidate_name=candidate_name
+    )
+    session.resume_id = resume_doc.get("identity_hash", "")
+    session.resume_text = resume_text
+    interview_sessions[session.session_id] = session
+    q_list = await interview_engine.get_batch(session, resume_text, 1)
+    return {
+        "session_id": session.session_id,
+        "candidate_name": candidate_name,
+        "experience": experience,
+        "level": level,
+        "batch": 1,
+        "total_batches": session.max_batch_generated,
+        "has_next": True,
+        "questions": format_questions(q_list)
+    }
+
+@router.get("/interview/answer")
+async def get_interview_answer(
+    session_id: str = Query(...),
+    question_id: str = Query(...)
+):
+    session = interview_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    question = _find_question(session, question_id)
+    if not question:
+        raise HTTPException(status_code=404, detail="Question not found")
+    if question.get("answer") is None:
+        answer = await interview_engine.generate_answer(question, session.resume_text, session.jd_text)
+        question["answer"] = answer
+    return {
+        "question_id": question["id"],
+        "question": question["question"],
+        "type": question["type"],
+        "skill": question["skill"],
+        "difficulty": question["difficulty"],
+        "answer": question["answer"]
     }
 
 from math import ceil
