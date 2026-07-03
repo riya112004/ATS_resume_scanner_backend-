@@ -76,12 +76,17 @@ async def compress_file(file_path: str, file_name: str) -> tuple[int, int]:
     """Compress a file in-place. Returns (new_size, original_size)."""
     ext = os.path.splitext(file_name)[1].lower()
 
-    if ext == ".pdf":
-        return compress_pdf(file_path)
-    elif ext in (".jpg", ".jpeg", ".png", ".webp"):
-        return compress_image(file_path)
-    elif ext == ".docx":
-        return compress_docx(file_path)
-    else:
+    try:
+        if ext == ".pdf":
+            return compress_pdf(file_path)
+        elif ext in (".jpg", ".jpeg", ".png", ".webp"):
+            return compress_image(file_path)
+        elif ext == ".docx":
+            return compress_docx(file_path)
+        else:
+            original = os.path.getsize(file_path)
+            return original, original
+    except Exception as e:
+        print(f"Compression failed for {file_name}: {e}. Skipping compression.")
         original = os.path.getsize(file_path)
         return original, original
