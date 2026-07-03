@@ -195,7 +195,12 @@ async def upload_resumes(
 
     # Step 1: Save ALL files to temp_uploads immediately, build pending list
     pending_items = []
+    skipped = 0
     for f in files:
+        basename = os.path.basename(f.filename)
+        if basename.startswith("._") or basename.startswith("~$"):
+            skipped += 1
+            continue
         content = await f.read()
         ext = os.path.splitext(f.filename)[1]
         file_uuid = str(uuid.uuid4())
@@ -217,22 +222,23 @@ async def upload_resumes(
         })
 
     # Step 2: Enqueue only first chunk, rest stays pending
+    chunk = pending_items[:settings.CHUNK_SIZE]
+    remaining = deepcopy(pending_items[settings.CHUNK_SIZE:])
     upload_progress[batch_id] = {
-        "total": len(files),
+        "total": len(pending_items),
         "done": 0,
         "status": "processing",
         "results": [],
-        "pending": deepcopy(pending_items),
+        "pending": remaining,
         "queued": 0
     }
 
-    chunk = pending_items[:settings.CHUNK_SIZE]
     for item in chunk:
         await upload_queue.put(item)
     upload_progress[batch_id]["queued"] = len(chunk)
 
-    logger.info(f"Batch {batch_id}: {len(files)} files saved, {len(chunk)} enqueued initially, {max(0, len(files) - settings.CHUNK_SIZE)} pending")
-    return {"batch_id": batch_id, "total": len(files)}
+    logger.info(f"Batch {batch_id}: {len(pending_items)} valid files ({skipped} skipped), {len(chunk)} enqueued initially, {max(0, len(pending_items) - settings.CHUNK_SIZE)} pending")
+    return {"batch_id": batch_id, "total": len(pending_items), "skipped": skipped}
 
 @router.get("/upload-status/{batch_id}")
 async def get_upload_status(batch_id: str):
