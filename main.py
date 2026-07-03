@@ -8,6 +8,9 @@ from recruiter.core.config import settings
 from contextlib import asynccontextmanager
 import os
 from fastapi.responses import Response, FileResponse
+from starlette.formparsers import MultiPartParser
+
+MultiPartParser.max_files = 5000
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

@@ -343,23 +343,41 @@ async def get_interview_questions(
 @router.get("/interview/answer")
 async def get_interview_answer(
     session_id: str = Query(...),
-    question_id: str = Query(...)
+    question_id: str = Query(...),
+    batch_id: Optional[str] = Query(None)
 ):
     session = interview_sessions.get(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    question = _find_question(session, question_id)
+
+    # If batch_id provided, search only that batch
+    if batch_id is not None and batch_id.strip() != "":
+        try:
+            batch_int = int(batch_id)
+        except (ValueError, TypeError):
+            batch_int = None
+        if batch_int is not None and batch_int in session.batches:
+            batch_qs = session.batches[batch_int]
+            question = next((q for q in batch_qs if q.get("id") == question_id), None)
+        else:
+            question = None
+    else:
+        question = _find_question(session, question_id)
+
     if not question:
         raise HTTPException(status_code=404, detail="Question not found")
     if question.get("answer") is None:
         answer = await interview_engine.generate_answer(question, session.resume_text, session.jd_text)
         question["answer"] = answer
+    batch_val = question.get("batch", 1)
     return {
         "question_id": question["id"],
         "question": question["question"],
         "type": question["type"],
         "skill": question["skill"],
         "difficulty": question["difficulty"],
+        "batch": batch_val,
+        "batch_id": batch_val,
         "answer": question["answer"]
     }
 

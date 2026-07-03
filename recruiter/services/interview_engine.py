@@ -199,7 +199,9 @@ Provide a model answer that:
 4. Matches the question difficulty level
 5. Is structured but conversational
 
-Keep the answer concise but comprehensive (2-4 paragraphs). If the question expects code, include a short code example."""
+Keep the answer concise but comprehensive (2-4 paragraphs). If the question expects code, include a short code example.
+
+Return ONLY a JSON object with the key "answer" containing the model answer."""
         try:
             response = await self.client.chat.completions.create(
                 model=settings.AI_MODEL,

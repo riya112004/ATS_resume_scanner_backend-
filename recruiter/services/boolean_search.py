@@ -18,7 +18,13 @@ class BooleanSearchEngine:
     def extract_keywords(self, query: str) -> List[str]:
         """Extracts literal terms for MongoDB fetch."""
         tokens = self.tokenize(query)
-        return [t.lower() for t in tokens if t.upper() not in self.operators and t not in ["(", ")"]]
+        keywords = []
+        for t in tokens:
+            if t.upper() not in self.operators and t not in ["(", ")"]:
+                keywords.append(t.lower())
+                if ' ' in t:
+                    keywords.append(t.replace(' ', ''))
+        return keywords
 
     def phrase_exists(self, phrase: str, text: str) -> bool:
         """Checks for the EXACT phrase or word in the text (with Wildcard support)."""
@@ -31,7 +37,12 @@ class BooleanSearchEngine:
             # Wildcard logic: Match any word starting with the root
             return bool(re.search(rf"\b{re.escape(root)}\w*", text))
 
-        if ' ' in phrase: return phrase in text
+        if phrase in text:
+            return True
+
+        if ' ' in phrase:
+            return phrase.replace(' ', '') in text
+
         return bool(re.search(rf"\b{re.escape(phrase)}\b", text))
 
     def evaluate_query(self, query_str: str, resume_text: str) -> Dict:
