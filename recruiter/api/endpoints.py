@@ -272,7 +272,8 @@ async def get_interview_questions(
     job_description: str = Form(...),
     experience: float = Form(...),
     session_id: Optional[str] = Form(None),
-    batch: Optional[int] = Form(None)
+    batch: Optional[int] = Form(None),
+    question_type: Optional[str] = Form(None)
 ):
     if experience < 0 or experience > 60:
         raise HTTPException(status_code=400, detail="Experience must be between 0 and 60 years")
@@ -292,7 +293,7 @@ async def get_interview_questions(
         if not session:
             raise HTTPException(status_code=404, detail="Session not found")
         target = batch if batch else (session.max_batch_generated + 1)
-        q_list = await interview_engine.get_batch(session, session.resume_text, target)
+        q_list = await interview_engine.get_batch(session, session.resume_text, target, session.question_type)
         return {
             "session_id": session.session_id,
             "experience": experience,
@@ -323,12 +324,13 @@ async def get_interview_questions(
         jd_text=f"Job Title: {job_title}\n\nJob Description: {job_description}",
         resume_text=resume_text,
         level=level,
-        candidate_name=candidate_name
+        candidate_name=candidate_name,
+        question_type=question_type or ""
     )
     session.resume_id = resume_doc.get("identity_hash", "")
     session.resume_text = resume_text
     interview_sessions[session.session_id] = session
-    q_list = await interview_engine.get_batch(session, resume_text, 1)
+    q_list = await interview_engine.get_batch(session, resume_text, 1, session.question_type)
     return {
         "session_id": session.session_id,
         "candidate_name": candidate_name,

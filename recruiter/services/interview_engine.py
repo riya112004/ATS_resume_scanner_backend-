@@ -16,7 +16,8 @@ CACHE_SIMILARITY_THRESHOLD = 0.90
 
 class InterviewSession:
     def __init__(self, session_id: str, candidate_name: str, resume_id: str,
-                 level: str, batches: dict, jd_text: str = ""):
+                 level: str, batches: dict, jd_text: str = "",
+                 question_type: str = ""):
         self.session_id = session_id
         self.candidate_name = candidate_name
         self.resume_id = resume_id
@@ -25,6 +26,7 @@ class InterviewSession:
         self.resume_text = ""
         self.batches = batches
         self.max_batch_generated = len(batches)
+        self.question_type = question_type
         self.created_at = datetime.now().isoformat()
 
 class InterviewEngine:
@@ -90,7 +92,8 @@ class InterviewEngine:
 
     async def _call_openai_questions(self, jd_text: str, resume_text: str,
                                       level: str, count: int = 5,
-                                      avoid_skills: list = None) -> list:
+                                      avoid_skills: list = None,
+                                      question_type: str = "") -> list:
         level_descriptions = {
             "fresher": "Fresher (0-1 years) — focus on fundamentals, academic projects, internships, learning ability, basic problem-solving. Do NOT expect industry experience.",
             "intermediate": "Intermediate (2-4 years) — focus on real projects, debugging, APIs, databases, optimization, practical experience, production scenarios.",
@@ -100,29 +103,35 @@ class InterviewEngine:
         avoid_text = ""
         if avoid_skills:
             avoid_text = f"\n\nIMPORTANT: Do NOT generate questions about these already-covered skills/topics: {', '.join(avoid_skills)}. Cover fresh topics from the JD and Resume."
-        prompt = f"""You are an expert technical interviewer. Generate interview questions based on the Job Description and Candidate Resume below.
+        type_instruction = ""
+        if question_type:
+            type_instruction = f"\n- ONLY generate questions of type: \"{question_type}\". Do NOT generate any other question types."
+        prompt = f"""You are an expert interviewer. Generate interview questions based on the Job Description and Candidate Resume below.
 
 TODAY'S DATE: {datetime.now().strftime("%B %Y")}
 
 CANDIDATE LEVEL: {level_desc}
 
+ROLE (from Job Title): Extract the core role from the job title (e.g., "Junior Software Engineer" → Software Engineer, "Registered Nurse" → Nurse) and test foundational knowledge expected for that role.
+
 Guidelines:
 - Questions must match the experience level requested
-- Mix different question types (technical, behavioral, project-based, problem-solving, resume-based) naturally
-- Make questions realistic, practical, and specific to the JD + Resume
-- Cover a variety of skills/topics from both JD and Resume
-- Each question should test a different skill{avoid_text}
+- Extract the key skills, tools, technologies, and requirements from the Job Description — test those specifically
+- Ask role-specific foundational questions (e.g., Software Engineer → coding, databases, system design; Nurse → patient care, procedures, protocols; Data Analyst → SQL, statistics, visualization)
+- Make questions realistic, practical, and directly tied to the JD — do NOT ask generic or surface-level questions
+- Ensure every question maps to a specific skill or requirement mentioned in the JD or essential for the role
+- Each question should test a different skill or topic{avoid_text}{type_instruction}
 
-JOB DESCRIPTION:
+JOB DESCRIPTION (extract skills, tools, domain knowledge from this):
 {jd_text[:4000]}
 
-CANDIDATE RESUME:
+CANDIDATE RESUME (for reference):
 {resume_text[:4000]}
 
 Return ONLY a JSON array of question objects with these keys:
 - id: unique string like "q1", "q2"
 - type: question type ("technical", "behavioral", "project", "resume", "coding", "system_design", "database")
-- skill: the primary skill/topic this question targets
+- skill: the primary skill/topic this question targets (must map to JD requirement or role foundation)
 - question: the actual interview question text
 - difficulty: "easy", "medium", or "hard" relative to the candidate level
 
@@ -148,7 +157,8 @@ Generate exactly {count} relevant questions."""
             raise
 
     async def create_session(self, jd_text: str, resume_text: str,
-                              level: str, candidate_name: str = "Candidate") -> InterviewSession:
+                              level: str, candidate_name: str = "Candidate",
+                              question_type: str = "") -> InterviewSession:
         logger.info(f"Creating session for {candidate_name}, level={level}")
         session_id = str(uuid.uuid4())
         return InterviewSession(
@@ -157,10 +167,11 @@ Generate exactly {count} relevant questions."""
             resume_id="",
             level=level,
             batches={},
-            jd_text=jd_text
+            jd_text=jd_text,
+            question_type=question_type
         )
 
-    async def get_batch(self, session: InterviewSession, resume_text: str, batch_num: int) -> list:
+    async def get_batch(self, session: InterviewSession, resume_text: str, batch_num: int, question_type: str = "") -> list:
         if batch_num in session.batches:
             return session.batches[batch_num]
         already_used_skills = []
@@ -170,7 +181,8 @@ Generate exactly {count} relevant questions."""
                     already_used_skills.append(q["skill"])
         new_questions = await self._call_openai_questions(
             session.jd_text, resume_text, session.level,
-            count=5, avoid_skills=already_used_skills
+            count=5, avoid_skills=already_used_skills,
+            question_type=question_type
         )
         for q in new_questions:
             q["batch"] = batch_num
