@@ -308,18 +308,54 @@ async def get_interview_questions(
     parsed = urlparse(resume_url)
     search_url = parsed.path if parsed.path else resume_url
     filename = os.path.basename(search_url)
-    resume_doc = await db.db["recruiter's resume"].find_one({
-        "$or": [
-            {"resumeURL": {"$regex": search_url, "$options": "i"}},
-            {"resumeURL": {"$regex": filename, "$options": "i"}}
-        ]
-    })
+
+    target_collections = ["recruiter's resume", "jobapplications", "internaljobapplications"]
+    resume_doc = None
+    for coll_name in target_collections:
+        resume_doc = await db.db[coll_name].find_one({
+            "$or": [
+                {"resumeURL": {"$regex": search_url, "$options": "i"}},
+                {"resumeUrl": {"$regex": search_url, "$options": "i"}},
+                {"resumeURL": {"$regex": filename, "$options": "i"}},
+                {"resumeUrl": {"$regex": filename, "$options": "i"}}
+            ]
+        })
+        if resume_doc:
+            break
+
     if not resume_doc:
         raise HTTPException(status_code=404, detail="Resume not found")
+
     resume_text = resume_doc.get("raw_content", "")
     if not resume_text:
+        file_name = os.path.basename(resume_url)
+
+        # 1. Try local disk
+        file_path = os.path.join(settings.UPLOAD_DIR, "resumes", file_name)
+        if os.path.exists(file_path):
+            resume_text = await extract_text_from_file(file_path=file_path)
+        else:
+            # 2. Use the frontend-provided resume_url directly (always full URL)
+            download_url = resume_url
+            try:
+                import urllib.request
+                import ssl
+                ctx = ssl._create_unverified_context()
+                resp = await asyncio.to_thread(urllib.request.urlopen, download_url, timeout=15, context=ctx)
+                file_bytes = resp.read()
+                resume_text = await extract_text_from_file(file_content=file_bytes, filename=file_name)
+            except Exception as e:
+                logger.warning(f"Failed to download resume from URL {download_url}: {e}")
+
+    if not resume_text:
         raise HTTPException(status_code=400, detail="Resume raw content not found")
-    candidate_name = resume_doc.get("extracted_data", {}).get("name", "Candidate")
+    applicant_data = resume_doc.get("applicant")
+    applicant_name = applicant_data.get("name") if isinstance(applicant_data, dict) else None
+    candidate_name = (
+        resume_doc.get("extracted_data", {}).get("name")
+        or applicant_name
+        or "Candidate"
+    )
     session = await interview_engine.create_session(
         jd_text=f"Job Title: {job_title}\n\nJob Description: {job_description}",
         resume_text=resume_text,

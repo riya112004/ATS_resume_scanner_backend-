@@ -104,34 +104,49 @@ class InterviewEngine:
         if avoid_skills:
             avoid_text = f"\n\nIMPORTANT: Do NOT generate questions about these already-covered skills/topics: {', '.join(avoid_skills)}. Cover fresh topics from the JD and Resume."
         type_instruction = ""
-        if question_type:
-            type_instruction = f"\n- ONLY generate questions of type: \"{question_type}\". Do NOT generate any other question types."
+        source_emphasis = ""
+
+        if question_type == "jd":
+            type_instruction = "\n- ONLY generate questions about the Job Description — test the skills, tools, and requirements listed in the JD. Do NOT ask resume-specific questions."
+            source_emphasis = "- Base ALL questions on the Job Description — extract skills, tools, technologies, and requirements from the JD and test those specifically\n- Do NOT ask questions based on the candidate's resume content"
+        elif question_type == "title":
+            type_instruction = "\n- ONLY generate role-specific foundational questions based on the job title"
+            source_emphasis = "- Focus on the JOB TITLE/ROLE — test the foundational knowledge expected for someone in this role (e.g., Software Engineer → coding, system design; Nurse → patient care, procedures)\n- Use JD and resume as context, but prioritize what someone in this role MUST know"
+        elif question_type == "behaviour":
+            type_instruction = "\n- ONLY generate questions of type: \"behavioral\". Do NOT generate any other question types."
+            source_emphasis = "- Focus on behavioral questions — teamwork, conflict resolution, leadership, communication, problem-solving, adaptability\n- Use the JD and resume for context but keep questions behavior-focused"
+        elif question_type == "technical":
+            type_instruction = "\n- ONLY generate questions of type: \"technical\". Do NOT generate any other question types."
+            source_emphasis = "- Extract technical skills, tools, programming languages, and technologies from BOTH the JD and the Resume\n- Test hands-on knowledge, real-world usage, and depth of understanding of these technical topics"
+        elif question_type == "resume":
+            type_instruction = "\n- ONLY generate questions of type: \"resume\" or \"project\". Do NOT generate any other question types."
+            source_emphasis = "- Base ALL questions on the CANDIDATE RESUME — their experience, projects, skills, education, certifications\n- Treat JD as secondary context only\n- Do NOT ask JD-specific questions. Every question must come from the resume content"
+        else:
+            type_instruction = ""
+            source_emphasis = "- Mix different question types naturally (technical, behavioral, resume-based, project-based)\n- Extract key skills and topics from BOTH the JD and Resume and test them"
+
         prompt = f"""You are an expert interviewer. Generate interview questions based on the Job Description and Candidate Resume below.
 
 TODAY'S DATE: {datetime.now().strftime("%B %Y")}
 
 CANDIDATE LEVEL: {level_desc}
 
-ROLE (from Job Title): Extract the core role from the job title (e.g., "Junior Software Engineer" → Software Engineer, "Registered Nurse" → Nurse) and test foundational knowledge expected for that role.
-
 Guidelines:
 - Questions must match the experience level requested
-- Extract the key skills, tools, technologies, and requirements from the Job Description — test those specifically
-- Ask role-specific foundational questions (e.g., Software Engineer → coding, databases, system design; Nurse → patient care, procedures, protocols; Data Analyst → SQL, statistics, visualization)
-- Make questions realistic, practical, and directly tied to the JD — do NOT ask generic or surface-level questions
-- Ensure every question maps to a specific skill or requirement mentioned in the JD or essential for the role
+{source_emphasis}
+- Ensure every question maps to a specific skill or topic
 - Each question should test a different skill or topic{avoid_text}{type_instruction}
 
-JOB DESCRIPTION (extract skills, tools, domain knowledge from this):
+JOB DESCRIPTION:
 {jd_text[:4000]}
 
-CANDIDATE RESUME (for reference):
+CANDIDATE RESUME:
 {resume_text[:4000]}
 
 Return ONLY a JSON array of question objects with these keys:
 - id: unique string like "q1", "q2"
 - type: question type ("technical", "behavioral", "project", "resume", "coding", "system_design", "database")
-- skill: the primary skill/topic this question targets (must map to JD requirement or role foundation)
+- skill: the primary skill/topic this question targets
 - question: the actual interview question text
 - difficulty: "easy", "medium", or "hard" relative to the candidate level
 
