@@ -12,5 +12,4 @@ python-docx
 python-dotenv
 openai
 sentence-transformers
-docx2pdf
 fpdf2

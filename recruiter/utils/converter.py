@@ -29,16 +29,23 @@ async def convert_to_pdf(file_path: str, filename: str):
 
     if ext in (".docx", ".doc"):
         try:
-            from docx2pdf import convert as docx2pdf_convert
+            import subprocess
             import asyncio
-            await asyncio.to_thread(docx2pdf_convert, file_path, pdf_path)
-            if os.path.exists(pdf_path):
+            proc = await asyncio.create_subprocess_exec(
+                "libreoffice", "--headless", "--convert-to", "pdf",
+                "--outdir", os.path.dirname(pdf_path),
+                file_path,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            rc = await proc.wait()
+            if rc == 0 and os.path.exists(pdf_path):
                 os.remove(file_path)
-                logger.info(f"Converted docx {filename} → {pdf_filename}")
+                logger.info(f"Converted {filename} → {pdf_filename} via LibreOffice")
                 return pdf_path, pdf_filename
-            raise Exception("docx2pdf produced no output")
+            raise Exception(f"LibreOffice exit code {rc}")
         except Exception as e:
-            logger.warning(f"docx2pdf failed for {filename}, trying fallback: {e}")
+            logger.warning(f"LibreOffice failed for {filename}, trying fallback: {e}")
             try:
                 from docx import Document
                 from fpdf import FPDF
