@@ -123,6 +123,12 @@ async def _process_one(item: dict, worker_id: int):
             _record_result(batch_id, {"filename": orig_filename, "status": "duplicate_resume", "message": f"Candidate {parsed_data.name} already exists.", "identity_hash": identity_hash, "resumeURL": existing.get("resumeURL")})
             return
 
+        # Compress and convert to PDF before moving to uploads
+        from recruiter.utils.compressor import compress_file
+        from recruiter.utils.converter import convert_to_pdf
+        await compress_file(temp_path, new_filename)
+        temp_path, new_filename = await convert_to_pdf(temp_path, new_filename)
+
         # Move from temp_uploads/ → uploads/
         perm_path = os.path.join(settings.UPLOAD_DIR, new_filename)
         shutil.move(temp_path, perm_path)
@@ -209,11 +215,6 @@ async def upload_resumes(
         temp_path = os.path.join(settings.TEMP_UPLOAD_DIR, new_filename)
         with open(temp_path, "wb") as out:
             out.write(content)
-
-        await compress_file(temp_path, f.filename)
-
-        from recruiter.utils.converter import convert_to_pdf
-        temp_path, new_filename = await convert_to_pdf(temp_path, new_filename)
 
         pending_items.append({
             "temp_path": temp_path,

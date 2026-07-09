@@ -1,6 +1,7 @@
 import os
 import io
 import fitz  # PyMuPDF
+fitz.TOOLS.mupdf_warnings(False)  # suppress MuPDF xref errors
 import pytesseract
 from PIL import Image
 from docx import Document
@@ -114,5 +115,18 @@ async def extract_text_from_docx(file_path: str = None, file_content: bytes = No
         doc = Document(io.BytesIO(file_content))
     else:
         doc = Document(file_path)
-    text = "\n".join([para.text for para in doc.paragraphs])
-    return text.strip()
+    parts = []
+    for para in doc.paragraphs:
+        t = para.text.strip()
+        if t:
+            parts.append(t)
+    for table in doc.tables:
+        for row in table.rows:
+            row_text = []
+            for cell in row.cells:
+                t = cell.text.strip()
+                if t:
+                    row_text.append(t)
+            if row_text:
+                parts.append(" | ".join(row_text))
+    return "\n".join(parts)
