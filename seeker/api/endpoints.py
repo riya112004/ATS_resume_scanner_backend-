@@ -2,6 +2,7 @@ import os
 import re
 import time
 import uuid
+import shutil
 import logging
 from typing import Optional
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Query
@@ -105,13 +106,18 @@ async def analyze_seeker_resume(
              raise ValueError("Could not extract text.")
         logger.info(f"[{request_id}] STEP 3 - Text extracted. Length: {len(raw_text)} chars")
 
-        # 5. Save file to uploads directory (for resumeURL link)
-        new_filename = f"{uuid.uuid4().hex}{ext}"
-        perm_path = os.path.join(settings.UPLOAD_DIR, new_filename)
-        with open(perm_path, "wb") as f:
+        # 5. Save file to uploads directory (for resumeURL link) — always PDF
+        temp_filename = f"{uuid.uuid4().hex}{ext}"
+        temp_path = os.path.join(settings.TEMP_UPLOAD_DIR, temp_filename)
+        with open(temp_path, "wb") as f:
             f.write(content)
-        relative_url = f"/uploads/{new_filename}"
-        logger.info(f"[{request_id}] STEP 4 - File saved to {perm_path}")
+
+        from recruiter.utils.converter import convert_to_pdf
+        pdf_path, pdf_filename = await convert_to_pdf(temp_path, temp_filename)
+        perm_path = os.path.join(settings.UPLOAD_DIR, pdf_filename)
+        shutil.move(pdf_path, perm_path)
+        relative_url = f"/uploads/{pdf_filename}"
+        logger.info(f"[{request_id}] STEP 4 - File saved as PDF: {perm_path}")
 
         # 6. Parse Resume using Recruiter's AI Parser (for DB storage)
         logger.info(f"[{request_id}] STEP 5 - Parsing resume with AI parser...")

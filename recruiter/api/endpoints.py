@@ -212,6 +212,9 @@ async def upload_resumes(
 
         await compress_file(temp_path, f.filename)
 
+        from recruiter.utils.converter import convert_to_pdf
+        temp_path, new_filename = await convert_to_pdf(temp_path, new_filename)
+
         pending_items.append({
             "temp_path": temp_path,
             "orig_filename": f.filename,
