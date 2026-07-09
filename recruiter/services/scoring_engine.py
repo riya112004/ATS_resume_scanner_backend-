@@ -20,8 +20,8 @@ class RecruiterScoringEngine:
             
         res_loc_values = [
             str(res_data.get("city", "")).lower(), 
-            str(res_data.get("state", "").lower()), 
-            str(res_data.get("country", "").lower())
+            str(res_data.get("state", "")).lower(), 
+            str(res_data.get("country", "")).lower()
         ]
         
         if any(p.lower() in res_loc_values for p in search_loc_parts):

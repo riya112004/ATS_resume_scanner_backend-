@@ -26,6 +26,25 @@ class BooleanSearchEngine:
                     keywords.append(t.replace(' ', ''))
         return keywords
 
+    def extract_positive_keywords(self, query: str) -> List[str]:
+        """Extracts only non-negated literal terms (skips terms after NOT/NOR)."""
+        tokens = self.tokenize(query)
+        keywords = []
+        negated = False
+        for t in tokens:
+            upper_t = t.upper()
+            if upper_t in ("NOT", "NOR"):
+                negated = True
+                continue
+            if upper_t in self.operators or t in ["(", ")"]:
+                negated = False
+                continue
+            if not negated:
+                keywords.append(t.lower())
+                if ' ' in t:
+                    keywords.append(t.replace(' ', ''))
+        return keywords
+
     def phrase_exists(self, phrase: str, text: str) -> bool:
         """Checks for the EXACT phrase or word in the text (with Wildcard support)."""
         phrase = phrase.lower().strip()

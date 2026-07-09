@@ -536,7 +536,7 @@ async def search_resumes(
     scored_results = []
     # Strip boolean operators from embedding text so "NOT/AND/OR" don't distort semantic score
     if is_boolean and query:
-        clean_keywords = boolean_engine.extract_keywords(query)
+        clean_keywords = boolean_engine.extract_positive_keywords(query)
         search_emb_text = " ".join(clean_keywords) if clean_keywords else query
     else:
         search_emb_text = f"{job_title or ''} {skills or ''} {location or ''}".strip()
